@@ -1,0 +1,17 @@
+[package]
+name = "ruloc"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "ruloc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+walkdir = "2.5"
+ra_ap_syntax = "0.0.234"
+log = "0.4"
+env_logger = "0.11"
