@@ -4,11 +4,15 @@
 //! Provides detailed statistics including total, production, and test code metrics.
 
 use clap::{Parser, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, trace};
 use ra_ap_syntax::{AstNode, SourceFile, SyntaxNode, ast, ast::HasAttrs};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 /// Statistics for lines of code in a given scope.
@@ -123,6 +127,32 @@ struct Args {
     /// Enable verbose output for debugging.
     #[arg(long)]
     verbose: bool,
+
+    /// Maximum file size to analyze (supports units: KB, MB, GB; defaults to bytes).
+    /// Examples: 1000, 3.5KB, 10MB, 1.1GB
+    #[arg(long, value_name = "SIZE")]
+    max_file_size: Option<String>,
+}
+
+impl Args {
+    /// Parses the max file size from the command-line argument.
+    ///
+    /// Supports units: KB, MB, GB. Without a unit, interprets as bytes.
+    ///
+    /// # Returns
+    ///
+    /// `Some(size_in_bytes)` if specified, `None` otherwise
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the size string cannot be parsed
+    fn parse_max_file_size(&self) -> Result<Option<u64>, String> {
+        let Some(ref size_str) = self.max_file_size else {
+            return Ok(None);
+        };
+
+        parse_file_size(size_str).map(Some)
+    }
 }
 
 impl Args {
@@ -149,6 +179,59 @@ enum LineType {
     Comment,
     /// Line contains code.
     Code,
+}
+
+/// Parses a file size string with optional unit suffix.
+///
+/// Supports units: KB, MB, GB (case-insensitive). Without a unit, interprets as bytes.
+/// Allows decimal numbers (e.g., "3.5KB").
+///
+/// # Arguments
+///
+/// * `size_str` - The size string to parse (e.g., "1000", "3.5KB", "10MB")
+///
+/// # Returns
+///
+/// The size in bytes as `u64`
+///
+/// # Errors
+///
+/// Returns an error if the string cannot be parsed as a valid size
+fn parse_file_size(size_str: &str) -> Result<u64, String> {
+    let size_str = size_str.trim();
+
+    // Try to match unit suffix
+    let (number_str, multiplier) =
+        if let Some(pos) = size_str.to_uppercase().find(|c: char| c.is_alphabetic()) {
+            let (num, unit) = size_str.split_at(pos);
+            let mult = match unit.to_uppercase().as_str() {
+                "KB" => 1024u64,
+                "MB" => 1024u64 * 1024,
+                "GB" => 1024u64 * 1024 * 1024,
+                _ => {
+                    return Err(format!(
+                        "Invalid size unit: '{}'. Supported units: KB, MB, GB",
+                        unit
+                    ));
+                }
+            };
+            (num, mult)
+        } else {
+            (size_str, 1u64)
+        };
+
+    // Parse the numeric part
+    let number: f64 = number_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid size number: '{}'", number_str))?;
+
+    if number < 0.0 {
+        return Err("File size cannot be negative".to_string());
+    }
+
+    let bytes = (number * multiplier as f64) as u64;
+    Ok(bytes)
 }
 
 /// Entry point for the ruloc CLI application.
@@ -181,11 +264,14 @@ fn main() -> Result<(), String> {
             .init();
     }
 
+    // Parse max file size if specified
+    let max_file_size = args.parse_max_file_size()?;
+
     // Determine what to analyze
     let file_stats = if let Some(file_path) = &args.file {
-        vec![analyze_file(file_path)?]
+        vec![analyze_file(file_path, max_file_size)?]
     } else if let Some(dir_path) = &args.dir {
-        analyze_directory(dir_path)?
+        analyze_directory(dir_path, max_file_size)?
     } else {
         // No arguments provided, show help
         eprintln!("Error: Either --file or --dir must be specified.\n");
@@ -421,16 +507,40 @@ fn classify_lines(content: &str) -> Vec<bool> {
 /// # Arguments
 ///
 /// * `path` - Path to the Rust source file to analyze
+/// * `max_file_size` - Optional maximum file size in bytes; files larger are skipped
 ///
 /// # Returns
 ///
 /// `Ok(FileStats)` with the analysis results, or `Err(String)` if file reading fails
+/// or the file exceeds the size limit
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read
-fn analyze_file(path: &Path) -> Result<FileStats, String> {
+/// Returns an error if the file cannot be read or exceeds the maximum size
+fn analyze_file(path: &Path, max_file_size: Option<u64>) -> Result<FileStats, String> {
     trace!("Analyzing file: {}", path.display());
+
+    // Check file size if limit is specified
+    if let Some(max_size) = max_file_size {
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("Failed to get metadata for {}: {}", path.display(), e))?;
+        let file_size = metadata.len();
+
+        if file_size > max_size {
+            debug!(
+                "Skipping file {} (size: {} bytes exceeds limit: {} bytes)",
+                path.display(),
+                file_size,
+                max_size
+            );
+            return Err(format!(
+                "File {} exceeds maximum size ({} > {} bytes)",
+                path.display(),
+                file_size,
+                max_size
+            ));
+        }
+    }
 
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -489,14 +599,16 @@ fn analyze_file(path: &Path) -> Result<FileStats, String> {
     })
 }
 
-/// Analyzes all Rust files in a directory recursively using directory traversal.
+/// Analyzes all Rust files in a directory recursively using parallel directory traversal.
 ///
-/// Walks the directory tree, identifies all `.rs` files, and analyzes each one.
-/// Follows symbolic links during traversal.
+/// Walks the directory tree, identifies all `.rs` files, and analyzes each one in parallel
+/// using rayon. Follows symbolic links during traversal. Files exceeding the size limit
+/// are skipped. Shows a progress bar during processing.
 ///
 /// # Arguments
 ///
 /// * `dir` - Path to the directory to analyze
+/// * `max_file_size` - Optional maximum file size in bytes; larger files are skipped
 ///
 /// # Returns
 ///
@@ -507,26 +619,72 @@ fn analyze_file(path: &Path) -> Result<FileStats, String> {
 ///
 /// Returns an error if:
 /// - No Rust files are found in the directory
-/// - Any individual file analysis fails
-fn analyze_directory(dir: &Path) -> Result<Vec<FileStats>, String> {
-    let mut file_stats = Vec::new();
-
-    for entry in WalkDir::new(dir)
+/// - Any individual file analysis fails (except for size limit violations, which are skipped)
+fn analyze_directory(dir: &Path, max_file_size: Option<u64>) -> Result<Vec<FileStats>, String> {
+    // First pass: collect all .rs file paths
+    let rust_files: Vec<PathBuf> = WalkDir::new(dir)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            file_stats.push(analyze_file(path)?);
-        }
-    }
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
+        .map(|e| e.path().to_path_buf())
+        .collect();
 
-    if file_stats.is_empty() {
+    if rust_files.is_empty() {
         return Err(format!("No Rust files found in {}", dir.display()));
     }
 
-    debug!("Analyzed {} files in {}", file_stats.len(), dir.display());
+    // Setup progress bar
+    let progress = ProgressBar::new(rust_files.len() as u64);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("█▓░"),
+    );
+
+    // Atomic counter for skipped files
+    let skipped_count = Arc::new(AtomicUsize::new(0));
+
+    // Second pass: analyze files in parallel
+    let file_stats: Vec<FileStats> = rust_files
+        .par_iter()
+        .filter_map(|path| {
+            let result = analyze_file(path, max_file_size);
+            progress.inc(1);
+
+            match result {
+                Ok(stats) => Some(stats),
+                Err(e) if e.contains("exceeds maximum size") => {
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    debug!("Skipped: {}", e);
+                    None
+                }
+                Err(e) => {
+                    progress.println(format!("Error: {}", e));
+                    None
+                }
+            }
+        })
+        .collect();
+
+    progress.finish_with_message("Analysis complete");
+
+    let final_skipped = skipped_count.load(Ordering::Relaxed);
+    debug!(
+        "Analyzed {} files in {} (skipped {} files exceeding size limit)",
+        file_stats.len(),
+        dir.display(),
+        final_skipped
+    );
+
+    if file_stats.is_empty() {
+        return Err(format!(
+            "No Rust files could be analyzed in {}",
+            dir.display()
+        ));
+    }
 
     Ok(file_stats)
 }
@@ -832,5 +990,61 @@ mod tests {
         assert_eq!(line_types[2], LineType::Comment);
         assert_eq!(line_types[3], LineType::Comment);
         assert_eq!(line_types[4], LineType::Code);
+    }
+
+    /// Tests parsing file size with no unit (bytes).
+    #[test]
+    fn test_parse_file_size_bytes() {
+        assert_eq!(parse_file_size("1000").unwrap(), 1000);
+        assert_eq!(parse_file_size("500").unwrap(), 500);
+        assert_eq!(parse_file_size("1").unwrap(), 1);
+    }
+
+    /// Tests parsing file size with KB unit.
+    #[test]
+    fn test_parse_file_size_kb() {
+        assert_eq!(parse_file_size("1KB").unwrap(), 1024);
+        assert_eq!(parse_file_size("1kb").unwrap(), 1024);
+        assert_eq!(parse_file_size("3.5KB").unwrap(), 3584);
+        assert_eq!(parse_file_size("10KB").unwrap(), 10240);
+    }
+
+    /// Tests parsing file size with MB unit.
+    #[test]
+    fn test_parse_file_size_mb() {
+        assert_eq!(parse_file_size("1MB").unwrap(), 1048576);
+        assert_eq!(parse_file_size("1mb").unwrap(), 1048576);
+        assert_eq!(parse_file_size("2.5MB").unwrap(), 2621440);
+    }
+
+    /// Tests parsing file size with GB unit.
+    #[test]
+    fn test_parse_file_size_gb() {
+        assert_eq!(parse_file_size("1GB").unwrap(), 1073741824);
+        assert_eq!(parse_file_size("1gb").unwrap(), 1073741824);
+        assert_eq!(parse_file_size("1.1GB").unwrap(), 1181116006);
+    }
+
+    /// Tests parsing file size with whitespace.
+    #[test]
+    fn test_parse_file_size_with_whitespace() {
+        assert_eq!(parse_file_size("  1000  ").unwrap(), 1000);
+        assert_eq!(parse_file_size("  3.5KB  ").unwrap(), 3584);
+    }
+
+    /// Tests parsing invalid file size returns error.
+    #[test]
+    fn test_parse_file_size_invalid() {
+        assert!(parse_file_size("invalid").is_err());
+        assert!(parse_file_size("").is_err());
+        assert!(parse_file_size("KB").is_err());
+        assert!(parse_file_size("1TB").is_err()); // Unsupported unit
+    }
+
+    /// Tests parsing negative file size returns error.
+    #[test]
+    fn test_parse_file_size_negative() {
+        assert!(parse_file_size("-100").is_err());
+        assert!(parse_file_size("-1KB").is_err());
     }
 }
