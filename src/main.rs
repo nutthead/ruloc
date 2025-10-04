@@ -96,7 +96,7 @@ pub struct Report {
 }
 
 /// Output format for the report.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     /// Plain text format (default).
     Text,
@@ -1046,5 +1046,328 @@ mod tests {
     fn test_parse_file_size_negative() {
         assert!(parse_file_size("-100").is_err());
         assert!(parse_file_size("-1KB").is_err());
+    }
+
+    /// Tests Args::parse_max_file_size with valid input.
+    #[test]
+    fn test_args_parse_max_file_size_some() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: false,
+            verbose: false,
+            max_file_size: Some("10MB".to_string()),
+        };
+        let result = args.parse_max_file_size().unwrap();
+        assert_eq!(result, Some(10 * 1024 * 1024));
+    }
+
+    /// Tests Args::parse_max_file_size with None.
+    #[test]
+    fn test_args_parse_max_file_size_none() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: false,
+            verbose: false,
+            max_file_size: None,
+        };
+        let result = args.parse_max_file_size().unwrap();
+        assert_eq!(result, None);
+    }
+
+    /// Tests Args::output_format returns Json when flag is set.
+    #[test]
+    fn test_args_output_format_json() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: true,
+            verbose: false,
+            max_file_size: None,
+        };
+        assert_eq!(args.output_format(), OutputFormat::Json);
+    }
+
+    /// Tests Args::output_format returns Text by default.
+    #[test]
+    fn test_args_output_format_text() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: false,
+            verbose: false,
+            max_file_size: None,
+        };
+        assert_eq!(args.output_format(), OutputFormat::Text);
+    }
+
+    /// Tests analyze_file with a real Rust file.
+    #[test]
+    fn test_analyze_file_integration() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_ruloc.rs");
+
+        let test_code = r#"
+// Production code
+fn hello() {
+    println!("hello");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_hello() {
+        assert!(true);
+    }
+}
+"#;
+
+        std::fs::write(&temp_file, test_code).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.total.all_lines > 0);
+        assert!(stats.production.code_lines > 0);
+        assert!(stats.test.code_lines > 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests analyze_file respects max_file_size limit.
+    #[test]
+    fn test_analyze_file_size_limit() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_ruloc_large.rs");
+
+        let test_code = "// A large file\n".repeat(100);
+        std::fs::write(&temp_file, &test_code).unwrap();
+
+        // File is ~1600 bytes, set limit to 100 bytes
+        let result = analyze_file(&temp_file, Some(100));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum size"));
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests output_text formatting.
+    #[test]
+    fn test_output_text() {
+        let report = Report {
+            summary: Summary {
+                files: 1,
+                total: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                },
+                production: LineStats {
+                    all_lines: 7,
+                    blank_lines: 1,
+                    comment_lines: 2,
+                    code_lines: 4,
+                },
+                test: LineStats {
+                    all_lines: 3,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 1,
+                },
+            },
+            files: vec![],
+        };
+
+        output_text(&report);
+        // Just ensure it doesn't panic
+    }
+
+    /// Tests output_json formatting.
+    #[test]
+    fn test_output_json() {
+        let report = Report {
+            summary: Summary {
+                files: 1,
+                total: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                },
+                production: LineStats {
+                    all_lines: 7,
+                    blank_lines: 1,
+                    comment_lines: 2,
+                    code_lines: 4,
+                },
+                test: LineStats {
+                    all_lines: 3,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 1,
+                },
+            },
+            files: vec![],
+        };
+
+        let result = output_json(&report);
+        assert!(result.is_ok());
+    }
+
+    /// Tests analyze_directory with a temporary directory structure.
+    #[test]
+    fn test_analyze_directory_integration() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_dir");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create test files
+        let file1 = temp_dir.join("file1.rs");
+        fs::write(&file1, "fn main() {}\n").unwrap();
+
+        let file2 = temp_dir.join("file2.rs");
+        fs::write(&file2, "#[test]\nfn test() {}\n").unwrap();
+
+        let result = analyze_directory(&temp_dir, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.len(), 2);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests analyze_directory with max_file_size filtering.
+    #[test]
+    fn test_analyze_directory_with_size_filter() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_dir_filter");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create a small file
+        let small_file = temp_dir.join("small.rs");
+        fs::write(&small_file, "fn f() {}\n").unwrap();
+
+        // Create a large file
+        let large_file = temp_dir.join("large.rs");
+        fs::write(&large_file, "// Large\n".repeat(100)).unwrap();
+
+        // Set size limit to 100 bytes - should skip the large file
+        let result = analyze_directory(&temp_dir, Some(100));
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        // Only the small file should be analyzed
+        assert!(stats.len() <= 1);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests analyze_file with invalid Rust code.
+    #[test]
+    fn test_analyze_file_invalid_rust() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_invalid.rs");
+
+        // This is syntactically invalid but should still count lines
+        let invalid_code = "fn broken( {}\nthis is not rust\n";
+        std::fs::write(&temp_file, invalid_code).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        // Should succeed even with invalid syntax, just counts lines
+        assert!(result.is_ok());
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests analyze_file with a file that has complex nested test modules.
+    #[test]
+    fn test_analyze_file_nested_tests() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_nested.rs");
+
+        let test_code = r#"
+fn prod() {}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(test)]
+    mod nested {
+        #[test]
+        fn inner_test() {}
+    }
+}
+"#;
+
+        std::fs::write(&temp_file, test_code).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.test.code_lines > 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests output_text with detailed file statistics.
+    #[test]
+    fn test_output_text_with_files() {
+        let report = Report {
+            summary: Summary {
+                files: 1,
+                total: LineStats {
+                    all_lines: 15,
+                    blank_lines: 3,
+                    comment_lines: 4,
+                    code_lines: 8,
+                },
+                production: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                },
+                test: LineStats {
+                    all_lines: 5,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 3,
+                },
+            },
+            files: vec![FileStats {
+                path: "test.rs".to_string(),
+                total: LineStats {
+                    all_lines: 15,
+                    blank_lines: 3,
+                    comment_lines: 4,
+                    code_lines: 8,
+                },
+                production: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                },
+                test: LineStats {
+                    all_lines: 5,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 3,
+                },
+            }],
+        };
+
+        output_text(&report);
+        // Just ensure it doesn't panic with file details
     }
 }
