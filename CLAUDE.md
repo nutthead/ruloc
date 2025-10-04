@@ -16,7 +16,45 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Test (single)**: `cargo test <test_name>`
 - **Check**: `cargo check` (faster than build, just type-checks)
 - **Format**: `cargo fmt`
-- **Lint**: `cargo clippy`
+- **Lint**: `cargo clippy --all-targets --all-features -- -D warnings`
+- **Coverage**: `cargo tarpaulin` (requires cargo-tarpaulin installation)
+
+## Code Coverage
+
+The project uses [cargo-tarpaulin](https://github.com/xd009642/tarpaulin) for code coverage analysis.
+
+### Installation
+
+```bash
+# Install tarpaulin (requires OpenSSL development libraries)
+nix-shell -p openssl pkg-config --run 'cargo install cargo-tarpaulin'
+
+# On Ubuntu/Debian, install dependencies first:
+# sudo apt-get install libssl-dev pkg-config
+
+# On Fedora:
+# sudo dnf install openssl-devel
+```
+
+### Running Coverage
+
+```bash
+# Run coverage with default configuration (from .tarpaulin.toml)
+cargo tarpaulin
+
+# Coverage must be >= 80% or the command will fail
+# Output formats: HTML, XML, JSON, LCOV
+# Reports saved to: target/tarpaulin/
+```
+
+### Coverage Configuration
+
+Coverage settings are defined in `.tarpaulin.toml`:
+
+- **Minimum coverage**: 80%
+- **Output formats**: HTML, XML, JSON, LCOV
+- **Engine**: LLVM (more accurate)
+- **Output directory**: `target/tarpaulin/`
 
 ## Project Structure
 

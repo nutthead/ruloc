@@ -1,0 +1,43 @@
+# Tarpaulin Configuration
+# Code coverage tool configuration for ruloc
+# Run with: cargo tarpaulin
+
+[default]
+# Output formats
+out = ["Html", "Xml", "Json", "Lcov"]
+
+# Output directory for reports
+output-dir = "target/tarpaulin"
+
+# Fail if coverage is below 80%
+fail-under = 80.0
+
+# Engine selection (Ptrace is the default and most compatible)
+# engine = "llvm"  # Disabled: use default Ptrace engine for better compatibility
+
+# Follow symbolic links
+follow-exec = true
+
+# Timeout for test execution (in seconds)
+timeout = 300
+
+# Exclude patterns (none for now, but can add if needed)
+# exclude-files = []
+
+# Include all features
+all-features = true
+
+# Run in release mode for more realistic coverage
+release = false
+
+# Skip cleaning to speed up repeated runs
+skip-clean = false
+
+# Verbose output
+verbose = true
+
+# Count hits per line (more detailed coverage info)
+count = true
+
+# Report zero coverage for all files
+report-all = true
