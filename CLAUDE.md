@@ -37,3 +37,11 @@ Single-file binary crate (all code in `src/main.rs`):
 - All functionality is in one file for simplicity
 - Test detection recursively walks the syntax tree to find test sections
 - Line counting uses simple text analysis, while production/test split uses AST parsing
+
+## Hard rules
+
+- **Rule 1:** Run `cargo fmt` after every conversation that changes or adds news `.rs` files
+- **Rule 2:** Run `cargo clippy --all-targets --all-features -- -D warnings` after every conversation that changes or adds news `.rs` files
+- **Rule 3:** Ensure rustdocs comments are always in-sync with the code they comment
+- **Rule 4:** Whenever you add new code to the project, ensure it has complete and eloquent rustdoc comments
+- **Rule 5:** Ensure all rustdocs follow the same professional and eloquent style and tone
