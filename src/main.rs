@@ -1370,4 +1370,230 @@ mod tests {
         output_text(&report);
         // Just ensure it doesn't panic with file details
     }
+
+    /// Tests analyze_file with an empty file.
+    #[test]
+    fn test_analyze_file_empty() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_empty.rs");
+
+        std::fs::write(&temp_file, "").unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.total.all_lines, 0);
+        assert_eq!(stats.total.code_lines, 0);
+        assert_eq!(stats.production.all_lines, 0);
+        assert_eq!(stats.test.all_lines, 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests analyze_directory with a directory containing no Rust files.
+    #[test]
+    fn test_analyze_directory_no_rust_files() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_no_rs");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create non-.rs files
+        let txt_file = temp_dir.join("readme.txt");
+        fs::write(&txt_file, "Not a Rust file").unwrap();
+
+        let result = analyze_directory(&temp_dir, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No Rust files found"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests analyze_directory where all files are too large.
+    #[test]
+    fn test_analyze_directory_all_files_too_large() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_all_large");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create large files that exceed size limit
+        let large_file1 = temp_dir.join("large1.rs");
+        fs::write(&large_file1, "// Large\n".repeat(100)).unwrap();
+
+        let large_file2 = temp_dir.join("large2.rs");
+        fs::write(&large_file2, "// Large\n".repeat(100)).unwrap();
+
+        // Set size limit to 50 bytes - all files will be skipped
+        let result = analyze_directory(&temp_dir, Some(50));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No Rust files could be analyzed"));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests analyze_file with a module using standalone #[cfg(test)] attribute.
+    #[test]
+    fn test_analyze_file_cfg_test_module() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_cfg_module.rs");
+
+        let test_code = r#"
+fn production_code() {}
+
+#[cfg(test)]
+mod test_module {
+    #[test]
+    fn test_helper() {}
+}
+"#;
+
+        std::fs::write(&temp_file, test_code).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.total.all_lines > 0);
+        assert!(stats.production.code_lines > 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests analyze_file with a very large file that exceeds size limit.
+    #[test]
+    fn test_analyze_file_exceeds_size_with_debug() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_large_debug.rs");
+
+        // Create a file larger than 500 bytes
+        let large_content = "// This is a large file\n".repeat(50);
+        std::fs::write(&temp_file, &large_content).unwrap();
+
+        // Set limit to 500 bytes - file should be rejected
+        let result = analyze_file(&temp_file, Some(500));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum size"));
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests parse_file_size with various edge cases for error handling.
+    #[test]
+    fn test_parse_file_size_edge_cases() {
+        // Test with decimal values
+        assert_eq!(parse_file_size("1.5KB").unwrap(), 1536);
+        assert_eq!(parse_file_size("0.5MB").unwrap(), 524288);
+
+        // Test case insensitivity
+        assert_eq!(parse_file_size("1kb").unwrap(), 1024);
+        assert_eq!(parse_file_size("1Kb").unwrap(), 1024);
+    }
+
+    /// Tests analyze_file with line at the boundary of file size limit.
+    #[test]
+    fn test_analyze_file_at_size_boundary() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_boundary.rs");
+
+        // Create a file exactly at the boundary
+        let content = "x".repeat(1000);
+        std::fs::write(&temp_file, &content).unwrap();
+
+        // Test with size exactly at the limit - should pass
+        let result = analyze_file(&temp_file, Some(1000));
+        assert!(result.is_ok());
+
+        // Test with size one byte under - should fail
+        let result = analyze_file(&temp_file, Some(999));
+        assert!(result.is_err());
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests file with only whitespace lines after empty check.
+    #[test]
+    fn test_analyze_file_only_whitespace() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_whitespace.rs");
+
+        let content = "   \n\t\n  \t  \n";
+        std::fs::write(&temp_file, content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.total.blank_lines, 3);
+        assert_eq!(stats.total.code_lines, 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests classify_lines with a mix of production and test code.
+    #[test]
+    fn test_classify_lines_mixed() {
+        let code = r#"
+fn production() {}
+
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+
+    #[test]
+    fn test_fn() {}
+}
+"#;
+        let result = classify_lines(code);
+
+        // Should identify test lines correctly
+        assert!(result.iter().any(|&is_test| is_test));
+        assert!(result.iter().any(|&is_test| !is_test));
+    }
+
+    /// Tests analyze_directory with mixed valid and invalid files.
+    #[test]
+    fn test_analyze_directory_mixed_files() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_mixed");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create valid files
+        let good1 = temp_dir.join("good1.rs");
+        fs::write(&good1, "fn a() {}").unwrap();
+
+        let good2 = temp_dir.join("good2.rs");
+        fs::write(&good2, "fn b() {}\n#[test]\nfn t() {}").unwrap();
+
+        // Create a subdirectory with more files
+        let subdir = temp_dir.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        let sub_file = subdir.join("sub.rs");
+        fs::write(&sub_file, "fn sub() {}").unwrap();
+
+        let result = analyze_directory(&temp_dir, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.len(), 3); // Should find all 3 .rs files
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests Args structure with parse_max_file_size error handling.
+    #[test]
+    fn test_args_parse_max_file_size_error() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: false,
+            verbose: false,
+            max_file_size: Some("invalid".to_string()),
+        };
+        let result = args.parse_max_file_size();
+        assert!(result.is_err());
+    }
 }
