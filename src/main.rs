@@ -5,15 +5,11 @@
 
 use clap::{Parser, ValueEnum};
 use log::{debug, trace};
-use ra_ap_syntax::{ast, ast::HasAttrs, AstNode, SourceFile, SyntaxNode};
+use ra_ap_syntax::{AstNode, SourceFile, SyntaxNode, ast, ast::HasAttrs};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
-
-// ============================================================================
-// Data Structures
-// ============================================================================
 
 /// Statistics for lines of code in a given scope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,7 +29,11 @@ pub struct LineStats {
 }
 
 impl LineStats {
-    /// Adds another `LineStats` to this one.
+    /// Adds another `LineStats` to this one, accumulating all metrics.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The line statistics to add to this instance
     pub fn add(&mut self, other: &LineStats) {
         self.all_lines += other.all_lines;
         self.blank_lines += other.blank_lines;
@@ -56,7 +56,7 @@ pub struct FileStats {
 }
 
 /// Summary statistics across all analyzed files.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Summary {
     /// Total number of files analyzed.
     pub files: usize,
@@ -68,19 +68,12 @@ pub struct Summary {
     pub test: LineStats,
 }
 
-impl Default for Summary {
-    fn default() -> Self {
-        Self {
-            files: 0,
-            total: LineStats::default(),
-            production: LineStats::default(),
-            test: LineStats::default(),
-        }
-    }
-}
-
 impl Summary {
-    /// Adds file statistics to this summary.
+    /// Adds file statistics to this summary, incrementing file count and accumulating metrics.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_stats` - The file statistics to add to this summary
     pub fn add_file(&mut self, file_stats: &FileStats) {
         self.files += 1;
         self.total.add(&file_stats.total);
@@ -97,10 +90,6 @@ pub struct Report {
     /// Individual statistics for each file.
     pub files: Vec<FileStats>,
 }
-
-// ============================================================================
-// CLI
-// ============================================================================
 
 /// Output format for the report.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -137,7 +126,11 @@ struct Args {
 }
 
 impl Args {
-    /// Determines the output format based on flags.
+    /// Determines the output format based on command-line flags.
+    ///
+    /// # Returns
+    ///
+    /// `OutputFormat::Json` if `--out-json` is specified, otherwise `OutputFormat::Text`
     fn output_format(&self) -> OutputFormat {
         if self.out_json {
             OutputFormat::Json
@@ -146,10 +139,6 @@ impl Args {
         }
     }
 }
-
-// ============================================================================
-// Line Analysis
-// ============================================================================
 
 /// Classifies line types in source code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +151,80 @@ enum LineType {
     Code,
 }
 
-/// Analyzes the content of source code to classify each line.
+/// Entry point for the ruloc CLI application.
+///
+/// Parses command-line arguments, initializes logging, analyzes the specified
+/// file or directory, and outputs the results in the requested format.
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(String)` with an error message on failure
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Neither `--file` nor `--dir` is specified
+/// - File reading fails
+/// - Directory contains no Rust files
+/// - JSON serialization fails
+fn main() -> Result<(), String> {
+    let args = Args::parse();
+
+    // Initialize logger
+    if args.verbose {
+        env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Trace)
+            .init();
+    } else {
+        env_logger::Builder::from_default_env()
+            .filter_level(log::LevelFilter::Warn)
+            .init();
+    }
+
+    // Determine what to analyze
+    let file_stats = if let Some(file_path) = &args.file {
+        vec![analyze_file(file_path)?]
+    } else if let Some(dir_path) = &args.dir {
+        analyze_directory(dir_path)?
+    } else {
+        // No arguments provided, show help
+        eprintln!("Error: Either --file or --dir must be specified.\n");
+        eprintln!("Use --help for more information.");
+        std::process::exit(1);
+    };
+
+    // Build summary
+    let mut summary = Summary::default();
+    for stats in &file_stats {
+        summary.add_file(stats);
+    }
+
+    let report = Report {
+        summary,
+        files: file_stats,
+    };
+
+    // Output results
+    match args.output_format() {
+        OutputFormat::Text => output_text(&report),
+        OutputFormat::Json => output_json(&report)?,
+    }
+
+    Ok(())
+}
+
+/// Analyzes the content of source code to classify each line as blank, comment, or code.
+///
+/// Handles both line comments (`//`) and block comments (`/* */`), tracking
+/// multiline block comment state across lines.
+///
+/// # Arguments
+///
+/// * `content` - The source code content to analyze
+///
+/// # Returns
+///
+/// A vector of `LineType` values, one for each line in the content
 fn analyze_lines(content: &str) -> Vec<LineType> {
     let mut line_types = Vec::new();
     let mut in_block_comment = false;
@@ -205,10 +267,22 @@ fn analyze_lines(content: &str) -> Vec<LineType> {
     line_types
 }
 
-/// Computes line statistics from classified line types.
+/// Computes line statistics from classified line types by counting occurrences.
+///
+/// # Arguments
+///
+/// * `line_types` - Slice of classified line types to count
+/// * `total_lines` - Total number of lines (used for the `all_lines` field)
+///
+/// # Returns
+///
+/// A `LineStats` instance with counts for each line type
 fn compute_line_stats(line_types: &[LineType], total_lines: usize) -> LineStats {
     let blank_lines = line_types.iter().filter(|&&t| t == LineType::Blank).count();
-    let comment_lines = line_types.iter().filter(|&&t| t == LineType::Comment).count();
+    let comment_lines = line_types
+        .iter()
+        .filter(|&&t| t == LineType::Comment)
+        .count();
     let code_lines = line_types.iter().filter(|&&t| t == LineType::Code).count();
 
     LineStats {
@@ -219,10 +293,6 @@ fn compute_line_stats(line_types: &[LineType], total_lines: usize) -> LineStats 
     }
 }
 
-// ============================================================================
-// Production vs Test Detection
-// ============================================================================
-
 /// Represents a code section with its classification and line range.
 #[derive(Debug, Clone)]
 struct CodeSection {
@@ -232,7 +302,18 @@ struct CodeSection {
     end_line: usize,
 }
 
-/// Determines if a syntax node represents a test item.
+/// Determines if a syntax node represents a test item by checking for test attributes.
+///
+/// Identifies functions with `#[test]` or `#[cfg(test)]` attributes, and modules
+/// with `#[cfg(test)]` attributes.
+///
+/// # Arguments
+///
+/// * `node` - The syntax tree node to examine
+///
+/// # Returns
+///
+/// `true` if the node represents a test function or test module, `false` otherwise
 fn is_test_node(node: &SyntaxNode) -> bool {
     // Check if this is a function with #[test] or #[cfg(test)] attribute
     if let Some(func) = ast::Fn::cast(node.clone()) {
@@ -261,7 +342,16 @@ fn is_test_node(node: &SyntaxNode) -> bool {
     false
 }
 
-/// Recursively finds test sections in the syntax tree.
+/// Recursively finds test sections in the syntax tree by traversing AST nodes.
+///
+/// When a test node is found, adds its line range to the sections vector and
+/// stops recursing into that subtree (since nested tests are part of the parent).
+///
+/// # Arguments
+///
+/// * `node` - The current syntax tree node being examined
+/// * `sections` - Mutable vector to collect discovered test sections
+/// * `content` - The complete source file content (used for line offset calculation)
 fn find_test_sections(node: &SyntaxNode, sections: &mut Vec<CodeSection>, content: &str) {
     if is_test_node(node) {
         let text_range = node.text_range();
@@ -285,7 +375,19 @@ fn find_test_sections(node: &SyntaxNode, sections: &mut Vec<CodeSection>, conten
     }
 }
 
-/// Determines which lines belong to production vs test code.
+/// Determines which lines belong to production vs test code using AST analysis.
+///
+/// Parses the source code to build a syntax tree, identifies all test sections,
+/// and marks their corresponding line ranges as test code.
+///
+/// # Arguments
+///
+/// * `content` - The source code content to classify
+///
+/// # Returns
+///
+/// A vector of boolean values, one per line, where `true` indicates test code
+/// and `false` indicates production code
 fn classify_lines(content: &str) -> Vec<bool> {
     let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
     let root = parse.syntax_node();
@@ -297,9 +399,8 @@ fn classify_lines(content: &str) -> Vec<bool> {
     let mut is_test_line = vec![false; total_lines];
 
     for section in test_sections {
-        for line_idx in section.start_line..=section.end_line.min(total_lines - 1) {
-            is_test_line[line_idx] = true;
-        }
+        let end = section.end_line.min(total_lines - 1);
+        is_test_line[section.start_line..=end].fill(true);
     }
 
     debug!(
@@ -312,11 +413,22 @@ fn classify_lines(content: &str) -> Vec<bool> {
     is_test_line
 }
 
-// ============================================================================
-// File Analysis
-// ============================================================================
-
-/// Analyzes a single Rust source file.
+/// Analyzes a single Rust source file to compute line statistics.
+///
+/// Reads the file, classifies lines as blank/comment/code, identifies test sections,
+/// and computes separate statistics for total, production, and test code.
+///
+/// # Arguments
+///
+/// * `path` - Path to the Rust source file to analyze
+///
+/// # Returns
+///
+/// `Ok(FileStats)` with the analysis results, or `Err(String)` if file reading fails
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read
 fn analyze_file(path: &Path) -> Result<FileStats, String> {
     trace!("Analyzing file: {}", path.display());
 
@@ -377,7 +489,25 @@ fn analyze_file(path: &Path) -> Result<FileStats, String> {
     })
 }
 
-/// Analyzes all Rust files in a directory recursively.
+/// Analyzes all Rust files in a directory recursively using directory traversal.
+///
+/// Walks the directory tree, identifies all `.rs` files, and analyzes each one.
+/// Follows symbolic links during traversal.
+///
+/// # Arguments
+///
+/// * `dir` - Path to the directory to analyze
+///
+/// # Returns
+///
+/// `Ok(Vec<FileStats>)` containing statistics for all analyzed files, or
+/// `Err(String)` if no Rust files are found or analysis fails
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - No Rust files are found in the directory
+/// - Any individual file analysis fails
 fn analyze_directory(dir: &Path) -> Result<Vec<FileStats>, String> {
     let mut file_stats = Vec::new();
 
@@ -401,11 +531,16 @@ fn analyze_directory(dir: &Path) -> Result<Vec<FileStats>, String> {
     Ok(file_stats)
 }
 
-// ============================================================================
-// Output Formatting
-// ============================================================================
-
-/// Formats line statistics for plain text output.
+/// Formats line statistics for plain text output with proper indentation.
+///
+/// # Arguments
+///
+/// * `stats` - The line statistics to format
+/// * `indent` - Number of spaces to indent each line
+///
+/// # Returns
+///
+/// A formatted string with all line counts displayed on separate lines
 fn format_line_stats(stats: &LineStats, indent: usize) -> String {
     let prefix = " ".repeat(indent);
     format!(
@@ -424,7 +559,14 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
     )
 }
 
-/// Outputs the report in plain text format.
+/// Outputs the report in plain text format to stdout.
+///
+/// Displays a summary section with aggregated statistics, followed by
+/// detailed statistics for each analyzed file.
+///
+/// # Arguments
+///
+/// * `report` - The analysis report to output
 fn output_text(report: &Report) {
     println!("Summary:");
     println!("  Files: {}", report.summary.files);
@@ -447,7 +589,21 @@ fn output_text(report: &Report) {
     }
 }
 
-/// Outputs the report in JSON format.
+/// Outputs the report in JSON format to stdout.
+///
+/// Serializes the report to pretty-printed JSON using serde.
+///
+/// # Arguments
+///
+/// * `report` - The analysis report to output
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(String)` if JSON serialization fails
+///
+/// # Errors
+///
+/// Returns an error if the report cannot be serialized to JSON
 fn output_json(report: &Report) -> Result<(), String> {
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
@@ -455,64 +611,20 @@ fn output_json(report: &Report) -> Result<(), String> {
     Ok(())
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
-fn main() -> Result<(), String> {
-    let args = Args::parse();
-
-    // Initialize logger
-    if args.verbose {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Trace)
-            .init();
-    } else {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Warn)
-            .init();
-    }
-
-    // Determine what to analyze
-    let file_stats = if let Some(file_path) = &args.file {
-        vec![analyze_file(file_path)?]
-    } else if let Some(dir_path) = &args.dir {
-        analyze_directory(dir_path)?
-    } else {
-        // No arguments provided, show help
-        eprintln!("Error: Either --file or --dir must be specified.\n");
-        eprintln!("Use --help for more information.");
-        std::process::exit(1);
-    };
-
-    // Build summary
-    let mut summary = Summary::default();
-    for stats in &file_stats {
-        summary.add_file(stats);
-    }
-
-    let report = Report {
-        summary,
-        files: file_stats,
-    };
-
-    // Output results
-    match args.output_format() {
-        OutputFormat::Text => output_text(&report),
-        OutputFormat::Json => output_json(&report)?,
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
+/// Unit tests for the ruloc line counting and analysis functionality.
+///
+/// Tests cover:
+/// - Line statistics operations (default, add)
+/// - Line classification (blank, comments, code)
+/// - Block comment handling
+/// - Production vs test code classification
+/// - Summary aggregation
+/// - Output formatting
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Tests that `LineStats::default()` creates a zero-initialized instance.
     #[test]
     fn test_line_stats_default() {
         let stats = LineStats::default();
@@ -522,6 +634,7 @@ mod tests {
         assert_eq!(stats.code_lines, 0);
     }
 
+    /// Tests that `LineStats::add()` correctly accumulates statistics.
     #[test]
     fn test_line_stats_add() {
         let mut stats1 = LineStats {
@@ -543,6 +656,7 @@ mod tests {
         assert_eq!(stats1.code_lines, 15);
     }
 
+    /// Tests that blank lines (empty or whitespace-only) are correctly identified.
     #[test]
     fn test_analyze_lines_blank() {
         let content = "\n\n  \n\t\n";
@@ -551,6 +665,7 @@ mod tests {
         assert!(line_types.iter().all(|&t| t == LineType::Blank));
     }
 
+    /// Tests that line comments (`//`) and doc comments (`///`) are correctly identified.
     #[test]
     fn test_analyze_lines_line_comments() {
         let content = "// comment 1\n// comment 2\n/// doc comment";
@@ -559,6 +674,7 @@ mod tests {
         assert!(line_types.iter().all(|&t| t == LineType::Comment));
     }
 
+    /// Tests that multiline block comments (`/* ... */`) are correctly identified.
     #[test]
     fn test_analyze_lines_block_comment() {
         let content = "/* start\nmiddle\nend */";
@@ -567,6 +683,7 @@ mod tests {
         assert!(line_types.iter().all(|&t| t == LineType::Comment));
     }
 
+    /// Tests that code lines are correctly identified.
     #[test]
     fn test_analyze_lines_code() {
         let content = "fn main() {\n    println!(\"hello\");\n}";
@@ -575,6 +692,7 @@ mod tests {
         assert!(line_types.iter().all(|&t| t == LineType::Code));
     }
 
+    /// Tests classification of mixed content (comments, blanks, and code).
     #[test]
     fn test_analyze_lines_mixed() {
         let content = "// comment\n\nfn main() {}";
@@ -585,6 +703,7 @@ mod tests {
         assert_eq!(line_types[2], LineType::Code);
     }
 
+    /// Tests that line statistics are correctly computed from line type classifications.
     #[test]
     fn test_compute_line_stats() {
         let line_types = vec![
@@ -601,6 +720,7 @@ mod tests {
         assert_eq!(stats.code_lines, 2);
     }
 
+    /// Tests that production code without tests is classified as non-test.
     #[test]
     fn test_classify_lines_no_tests() {
         let content = "fn main() {\n    println!(\"hello\");\n}";
@@ -609,6 +729,7 @@ mod tests {
         assert!(is_test.iter().all(|&x| !x));
     }
 
+    /// Tests that functions marked with `#[test]` are correctly identified as test code.
     #[test]
     fn test_classify_lines_with_test_function() {
         let content = r#"
@@ -621,11 +742,12 @@ fn test_something() {
 "#;
         let is_test = classify_lines(content);
         // Lines: "", "fn production() {}", "", "#[test]", "fn test_something() {", "    assert!(true);", "}"
-        assert!(is_test.len() > 0);
+        assert!(!is_test.is_empty());
         // The test function lines should be marked as test
         assert!(is_test.iter().any(|&x| x));
     }
 
+    /// Tests that modules marked with `#[cfg(test)]` are correctly identified as test code.
     #[test]
     fn test_classify_lines_with_test_module() {
         let content = r#"
@@ -638,11 +760,12 @@ mod tests {
 }
 "#;
         let is_test = classify_lines(content);
-        assert!(is_test.len() > 0);
+        assert!(!is_test.is_empty());
         // The module and its contents should be marked as test
         assert!(is_test.iter().any(|&x| x));
     }
 
+    /// Tests that `Summary::add_file()` correctly aggregates file statistics.
     #[test]
     fn test_summary_add_file() {
         let mut summary = Summary::default();
@@ -674,6 +797,7 @@ mod tests {
         assert_eq!(summary.test.all_lines, 3);
     }
 
+    /// Tests that line statistics are correctly formatted for text output.
     #[test]
     fn test_format_line_stats() {
         let stats = LineStats {
@@ -689,6 +813,7 @@ mod tests {
         assert!(formatted.contains("Code lines: 50"));
     }
 
+    /// Tests that empty files (with no content) are handled correctly.
     #[test]
     fn test_empty_file_analysis() {
         let content = "";
@@ -696,6 +821,7 @@ mod tests {
         assert_eq!(line_types.len(), 0);
     }
 
+    /// Tests that multiline block comments spanning multiple lines are correctly handled.
     #[test]
     fn test_analyze_lines_multiline_block_comment() {
         let content = "code line\n/* comment start\ncomment middle\ncomment end */\nmore code";
