@@ -139,7 +139,7 @@ jobs:
       - name: Package and inspect
         run: |
           echo "Packaging crate..."
-          cargo package --locked --allow-dirty
+          cargo package --locked
 
           echo ""
           echo "Package contents:"
