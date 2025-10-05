@@ -543,6 +543,18 @@ jobs:
         if: github.event.inputs.skip_publish != 'true'
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
-          sleep 30
-
-          curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num'
+          # Poll crates.io for the published version with exponential backoff (max 10 attempts, up to ~5 min)
+          for i in {1..10}; do
+            PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num')
+            if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
+              echo "Crate version $VERSION is available on crates.io."
+              break
+            else
+              echo "Crate version $VERSION not yet available on crates.io. Attempt $i/10. Retrying in $((i * 10)) seconds..."
+              sleep $((i * 10))
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "Crate version $VERSION did not appear on crates.io after $i attempts. Failing."
+              exit 1
+            fi
+          done

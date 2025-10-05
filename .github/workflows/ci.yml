@@ -234,7 +234,7 @@ jobs:
 
       - name: Install coverage parser
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
-        run: npm install fast-xml-parser@5.2.5 dedent@1.7.0 --no-save --no-package-lock
+        run: npm install fast-xml-parser@5.2.5 dedent@1.7.0 --no-save
 
       - name: Comment coverage on PR
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
