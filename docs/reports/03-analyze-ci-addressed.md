@@ -1226,15 +1226,114 @@ This comprehensive analysis demonstrated:
 5. Monitor the next production release to confirm signatures are created and verifiable
 6. Consider this analysis complete - comprehensive review finished
 
+## Final Review Findings (Post-Fix Verification)
+
+### Finding #11: Missing Permission for Coverage PR Comments ✅ FIXED
+
+**Expert Feedback:**
+> CI coverage PR comment lacks permission after you scoped workflow-level permissions down. Current: ci.yml top-level permissions: contents: read, actions: read. coverage job uses actions/github-script to call issues.createComment. Without job-level permissions, that comment will 403.
+
+**Analysis:**
+When scoping permissions from workflow-level to job-level (Minor Finding #1), the coverage job was given `pull-requests: write` permission. However, the `actions/github-script` action calls `github.rest.issues.createComment()`, which requires `issues: write` permission, not `pull-requests: write`.
+
+**Root Cause:**
+Misunderstanding of GitHub API permissions. While PRs are issues, the specific API endpoint `issues.createComment` requires the `issues` scope, not `pull-requests` scope.
+
+**Impact:**
+- **Severity:** HIGH (blocks functionality)
+- **Effect:** Coverage job would fail with 403 Forbidden when attempting to post PR comments
+- **Scope:** All pull requests in CI workflow
+
+**Resolution:**
+```yaml
+# Before (Incorrect):
+coverage:
+  permissions:
+    contents: read
+    pull-requests: write  # Wrong permission
+
+# After (Correct):
+coverage:
+  permissions:
+    contents: read
+    issues: write  # Correct permission for issues.createComment
+```
+
+**Files Modified:**
+- `.github/workflows/ci.yml:197` - Changed permission from `pull-requests: write` to `issues: write`
+
+### Finding #12: Certificate Identity Hardening (Optional) ✅ IMPLEMENTED
+
+**Expert Suggestion:**
+> Optional hardening: The verify step's certificate-identity-regexp could be tighter than @.* — e.g. @refs/tags/v.* would only allow signatures from tag-triggered releases.
+
+**Analysis:**
+The current pattern `@.*` accepts any git ref (branches, tags, etc.). Since releases are only triggered by version tags (v*.*.*), we can tighten this to only accept tag refs matching the version pattern.
+
+**Security Benefit:**
+- Prevents acceptance of signatures from non-release workflows
+- Ensures only tag-triggered releases are considered valid
+- Defense-in-depth: adds specificity to identity verification
+
+**Implementation:**
+```yaml
+# Before (Permissive):
+WORKFLOW_ID="https://github.com/.../release.yml@.*"
+
+# After (Strict):
+WORKFLOW_ID="https://github.com/.../release.yml@refs/tags/v.*"
+```
+
+**Files Modified:**
+- `.github/workflows/release.yml:425` - Tightened regex in release notes template
+- `.github/workflows/release.yml:535` - Tightened regex in verify-release job
+
+**Rationale:**
+Since the workflow is only triggered by tags matching `v*.*.*` (line 15-16), verification should only accept signatures from those tag refs. This follows the principle of least privilege for identity verification.
+
+### Updated Summary
+
+**Total Findings:** 12 (5 major + 5 minor + 2 final)
+- ✅ Finding #1: OIDC issuer misconfiguration (CRITICAL) - Fixed
+- ✅ Finding #2: Certificate identity mismatch (CRITICAL) - Fixed
+- ❌ Finding #3: Coverage filename mismatch (DISPROVEN)
+- ✅ Finding #4: Global RUSTFLAGS (CLEANUP) - Fixed
+- ✅ Finding #5: Non-standard Cosign env vars (CLEANUP) - Fixed
+- ✅ Minor #1: Workflow permissions scope (SECURITY) - Fixed
+- ✅ Minor #2: Test parallelism disabled (PERFORMANCE) - Fixed
+- ℹ️  Minor #3: musl dependencies (ACKNOWLEDGED, no change)
+- ✅ Minor #4: Experimental targets (RISK MITIGATION) - Fixed
+- ℹ️  Minor #5: Tool consistency (ACKNOWLEDGED, intentional)
+- ✅ Finding #11: Missing issues permission (HIGH) - Fixed
+- ✅ Finding #12: Identity regex hardening (OPTIONAL) - Implemented
+
+**Files Modified (Final Count):**
+1. **`.github/workflows/ci.yml`**:
+   - Removed global `RUSTFLAGS: "-D warnings"`
+   - Scoped permissions to job-level
+   - Fixed coverage job permission (`issues: write` instead of `pull-requests: write`)
+   - Removed `--test-threads=1`
+
+2. **`.github/workflows/release.yml`**:
+   - Fixed OIDC issuer (Finding #1)
+   - Fixed certificate identity pattern (Finding #2)
+   - Removed unused `FULCIO_URL` and `REKOR_URL`
+   - Added experimental flags for riscv64 and Windows ARM64
+   - Tightened identity regex to `@refs/tags/v.*` (hardening)
+
+3. **`docs/reports/03-analyze-ci-addressed.md`**:
+   - Comprehensive documentation of all findings and resolutions
+
 ---
 
 **Report prepared by:** Claude Code
 **Session date:** 2025-10-05
 **Workflows modified:**
-- `.github/workflows/ci.yml` (OIDC issuer, certificate identity, RUSTFLAGS, permissions, test parallelism)
-- `.github/workflows/release.yml` (unused env vars, experimental target flags)
-**Findings analyzed:** 10 total
+- `.github/workflows/ci.yml` (OIDC issuer, certificate identity, RUSTFLAGS, permissions, test parallelism, coverage permissions)
+- `.github/workflows/release.yml` (unused env vars, experimental target flags, identity regex hardening)
+**Findings analyzed:** 12 total
 - 5 major findings (4 fixed, 1 verified incorrect)
 - 5 minor findings (3 fixed, 2 acknowledged as intentional/working)
-**Lines changed:** ~15 across 2 workflow files + comprehensive documentation
-**Commits:** Pending
+- 2 final findings (both fixed - critical permission + optional hardening)
+**Lines changed:** ~20 across 2 workflow files + comprehensive documentation
+**Status:** All findings addressed, ready to commit
