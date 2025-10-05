@@ -1,7 +1,20 @@
 //! # ruloc - Rust Lines of Code Counter
 //!
-//! A minimalist tool for counting lines of code in Rust source files.
-//! Provides detailed statistics including total, production, and test code metrics.
+//! A sophisticated yet minimalist command-line tool designed for precise analysis of Rust source code.
+//! Employs AST-based parsing to accurately distinguish between production and test code, providing
+//! granular metrics across blank lines, comments, rustdoc documentation, and executable code.
+//!
+//! ## Core Capabilities
+//!
+//! - **AST-Driven Analysis**: Leverages `ra_ap_syntax` for token-level parsing, ensuring accurate
+//!   classification of code elements even within complex constructs like raw strings and macros.
+//! - **Production/Test Separation**: Intelligently identifies test modules and functions via
+//!   `#[test]` and `#[cfg(test)]` attributes, segregating metrics accordingly.
+//! - **Memory-Efficient Architecture**: Implements streaming accumulators supporting both in-memory
+//!   and file-backed storage, enabling analysis of arbitrarily large codebases.
+//! - **Parallel Processing**: Utilizes Rayon for concurrent file analysis, maximizing throughput
+//!   on multi-core systems.
+//! - **Flexible Output**: Supports both human-readable text and machine-parseable JSON formats.
 
 use clap::{Parser, ValueEnum};
 use colored::Colorize;
@@ -27,32 +40,65 @@ const TEXT_OUTPUT_BASE_INDENT: usize = 4;
 /// Number of spaces for nested indentation level in text output formatting.
 const TEXT_OUTPUT_NESTED_INDENT: usize = 6;
 
-/// Statistics for lines of code in a given scope.
+/// Comprehensive line-level statistics for a defined scope of Rust source code.
+///
+/// Provides a complete breakdown of source code composition, categorizing every line
+/// into mutually exclusive classifications. Designed for serialization via serde with
+/// kebab-case field naming for enhanced interoperability with external tools.
+///
+/// # Classification Taxonomy
+///
+/// - **All Lines**: Aggregate count encompassing the entire scope
+/// - **Blank Lines**: Lines containing exclusively whitespace characters (spaces, tabs, newlines)
+/// - **Comment Lines**: Standard comments (`//` and `/* */`) excluding documentation
+/// - **Rustdoc Lines**: Documentation comments (`///`, `//!`, `/**`, `/*!`)
+/// - **Code Lines**: Executable Rust code including declarations, expressions, and statements
+///
+/// # Invariants
+///
+/// The sum of blank, comment, rustdoc, and code lines equals `all_lines` for valid statistics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LineStats {
-    /// Total number of lines including everything.
+    /// Aggregate count of all lines within the analyzed scope.
     #[serde(rename = "all-lines")]
     pub all_lines: usize,
-    /// Number of blank lines (whitespace only).
+
+    /// Count of lines consisting solely of whitespace characters.
     #[serde(rename = "blank-lines")]
     pub blank_lines: usize,
-    /// Number of comment lines, excluding rustdocs.
+
+    /// Count of non-documentation comment lines.
     #[serde(rename = "comment-lines")]
     pub comment_lines: usize,
-    /// Number of rustdoc lines.
+
+    /// Count of rustdoc documentation comment lines.
     #[serde(rename = "rustdoc-lines")]
     pub rustdoc_lines: usize,
-    /// Number of actual code lines.
+
+    /// Count of executable code lines.
     #[serde(rename = "code-lines")]
     pub code_lines: usize,
 }
 
 impl LineStats {
-    /// Adds another `LineStats` to this one, accumulating all metrics.
+    /// Performs element-wise accumulation of metrics from another instance.
+    ///
+    /// Aggregates line counts across all categories, enabling hierarchical composition
+    /// of statistics from individual files to directory-level summaries.
     ///
     /// # Arguments
     ///
-    /// * `other` - The line statistics to add to this instance
+    /// * `other` - The statistics instance to merge into this one
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut total = LineStats { all_lines: 100, code_lines: 60, ..Default::default() };
+    /// let additional = LineStats { all_lines: 50, code_lines: 30, ..Default::default() };
+    /// total.add(&additional);
+    /// assert_eq!(total.all_lines, 150);
+    /// assert_eq!(total.code_lines, 90);
+    /// ```
     pub fn add(&mut self, other: &LineStats) {
         self.all_lines += other.all_lines;
         self.blank_lines += other.blank_lines;
@@ -62,38 +108,84 @@ impl LineStats {
     }
 }
 
-/// Statistics for a single file, broken down by total, production, and test code.
+/// Tripartite statistical analysis of a single Rust source file.
+///
+/// Segregates metrics into three orthogonal perspectives: aggregate totals, production code,
+/// and test code. This decomposition facilitates precise understanding of code distribution
+/// between implementation and verification concerns.
+///
+/// # Field Relationships
+///
+/// - `total` = `production` + `test` (component-wise)
+/// - All line counts within each `LineStats` instance maintain their individual invariants
+///
+/// # Use Cases
+///
+/// - Tracking test coverage ratios
+/// - Identifying files with disproportionate test/production ratios
+/// - Aggregating directory-level statistics
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileStats {
-    /// Path to the file relative to the analysis root.
+    /// Canonical path to the analyzed file, relative to the analysis root directory.
     pub path: String,
-    /// Statistics for all code in the file.
+
+    /// Aggregate statistics encompassing all content within the file.
     pub total: LineStats,
-    /// Statistics for production code only.
+
+    /// Statistics exclusively for production code, excluding test modules and functions.
     pub production: LineStats,
-    /// Statistics for test code only.
+
+    /// Statistics exclusively for test code identified via `#[test]` and `#[cfg(test)]`.
     pub test: LineStats,
 }
 
-/// Summary statistics across all analyzed files.
+/// Consolidated statistical summary aggregated across an entire analysis scope.
+///
+/// Represents the culmination of file-level metrics rolled up into a comprehensive
+/// project or directory-wide overview. Maintains the tripartite decomposition
+/// (total/production/test) while tracking the number of files contributing to the aggregate.
+///
+/// # Aggregation Semantics
+///
+/// - File count increments with each unique file added
+/// - Line statistics accumulate additively across all dimensions
+/// - Preserves production/test separation throughout the hierarchy
+///
+/// # Applications
+///
+/// - Project-wide code composition reports
+/// - Comparative analysis across multiple directories
+/// - Baseline metrics for CI/CD pipelines
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Summary {
-    /// Total number of files analyzed.
+    /// Cardinal count of unique files incorporated into this summary.
     pub files: usize,
-    /// Aggregate statistics for all code.
+
+    /// Aggregate line statistics spanning all analyzed files.
     pub total: LineStats,
-    /// Aggregate statistics for production code.
+
+    /// Aggregate production code statistics across all files.
     pub production: LineStats,
-    /// Aggregate statistics for test code.
+
+    /// Aggregate test code statistics across all files.
     pub test: LineStats,
 }
 
 impl Summary {
-    /// Adds file statistics to this summary, incrementing file count and accumulating metrics.
+    /// Incorporates file-level statistics into this aggregate summary.
+    ///
+    /// Atomically increments the file counter and merges all three statistical dimensions
+    /// (total, production, test) into their respective accumulators.
     ///
     /// # Arguments
     ///
-    /// * `file_stats` - The file statistics to add to this summary
+    /// * `file_stats` - Complete statistical profile of a single file to integrate
+    ///
+    /// # Postconditions
+    ///
+    /// - `self.files` increases by exactly 1
+    /// - All line counts in `self.total`, `self.production`, and `self.test` increase
+    ///   by their corresponding values from `file_stats`
     pub fn add_file(&mut self, file_stats: &FileStats) {
         self.files += 1;
         self.total.add(&file_stats.total);
@@ -102,59 +194,116 @@ impl Summary {
     }
 }
 
-/// Complete analysis report including summary and per-file statistics.
+/// Comprehensive analysis report encapsulating both aggregate and granular metrics.
+///
+/// Serves as the canonical output structure combining high-level summary statistics
+/// with detailed per-file breakdowns. Designed for serialization to JSON or rendering
+/// as human-readable text output.
+///
+/// # Structure
+///
+/// - **Summary**: Consolidated view of all files, providing immediate insights into
+///   overall codebase composition
+/// - **Files**: Exhaustive list of individual file analyses, preserving granularity
+///   for detailed examination and drill-down analysis
+///
+/// # Serialization
+///
+/// When serialized to JSON, produces a two-section structure ideal for programmatic
+/// consumption by CI/CD tools, static analyzers, or custom reporting pipelines.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Report {
-    /// Summary of all analyzed files.
+    /// Aggregate statistical summary spanning all analyzed files.
     pub summary: Summary,
-    /// Individual statistics for each file.
+
+    /// Ordered collection of per-file statistical analyses.
     pub files: Vec<FileStats>,
 }
 
-/// Trait for accumulating file statistics in a memory-efficient manner.
+/// Strategy pattern for memory-efficient accumulation of file statistics.
 ///
-/// Implementations can choose to store data in memory or stream to disk,
-/// allowing the tool to handle arbitrarily large codebases without
-/// excessive memory consumption.
+/// Defines a polymorphic interface enabling distinct storage backends for statistical
+/// data. Implementations may optimize for different constraints: in-memory accumulation
+/// for speed with small codebases, or streaming to disk for large-scale analyses
+/// exceeding available RAM.
+///
+/// # Design Rationale
+///
+/// - **Scalability**: Prevents memory exhaustion when analyzing extensive codebases
+/// - **Flexibility**: Permits runtime selection of accumulation strategy based on context
+/// - **Thread Safety**: Requires `Send + Sync` to support parallel file processing
+///
+/// # Implementations
+///
+/// - [`InMemoryAccumulator`]: Stores all data in `Vec`, optimized for small to medium projects
+/// - [`FileBackedAccumulator`]: Streams to temporary file, suitable for arbitrarily large codebases
 pub trait StatsAccumulator: Send + Sync {
-    /// Adds file statistics to the accumulator.
+    /// Incorporates a file's statistics into the accumulator.
     ///
     /// # Arguments
     ///
-    /// * `file_stats` - The file statistics to add
+    /// * `file_stats` - Complete statistical profile for a single analyzed file
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails (e.g., disk I/O error)
+    /// Returns `Err` if the underlying storage mechanism fails (e.g., disk I/O errors,
+    /// serialization failures, or out-of-disk-space conditions).
     fn add_file(&mut self, file_stats: &FileStats) -> Result<(), String>;
 
-    /// Returns the current summary of all accumulated statistics.
+    /// Retrieves a snapshot of the current aggregate summary.
+    ///
+    /// Provides O(1) access to consolidated statistics without requiring traversal
+    /// of all accumulated files. The summary reflects all files added up to this point.
     ///
     /// # Returns
     ///
-    /// A `Summary` containing aggregated statistics for all files
+    /// Current `Summary` instance representing the aggregate of all accumulated files
     fn get_summary(&self) -> Summary;
 
-    /// Creates a boxed iterator over all accumulated file statistics.
+    /// Constructs an iterator yielding individual file statistics.
+    ///
+    /// Enables sequential traversal of all accumulated file data for detailed reporting
+    /// or analysis. For file-backed implementations, this typically involves reading
+    /// from persistent storage.
     ///
     /// # Returns
     ///
-    /// An iterator yielding `FileStats` for each file
+    /// Boxed iterator producing `FileStats` instances in insertion order
     ///
     /// # Errors
     ///
-    /// Returns an error if reading back the data fails
+    /// Returns `Err` if the backing store cannot be read (e.g., file corruption,
+    /// permission issues, or deserialization failures).
     fn iter_files(&self) -> Result<Box<dyn Iterator<Item = FileStats>>, String>;
 }
 
-/// In-memory accumulator for file statistics.
+/// High-performance in-memory statistics accumulator optimized for small to medium codebases.
 ///
-/// Stores all file statistics in a `Vec` in memory. Suitable for small
-/// codebases or testing, but may consume excessive memory for large projects.
+/// Maintains all file statistics in a contiguous `Vec`, providing optimal iteration performance
+/// and zero I/O overhead. Suitable for projects with manageable file counts where memory
+/// consumption remains within acceptable bounds.
+///
+/// # Performance Characteristics
+///
+/// - **Time Complexity**: O(1) for `add_file`, O(1) for `get_summary`, O(n) for `iter_files`
+/// - **Space Complexity**: O(n) where n is the number of accumulated files
+/// - **Memory Footprint**: Proportional to total number of files × sizeof(`FileStats`)
+///
+/// # Recommended Usage
+///
+/// - Projects with fewer than 10,000 files
+/// - Environments with ample available RAM
+/// - Scenarios requiring high-speed iteration over file statistics
+///
+/// # Alternative
+///
+/// For large-scale analyses, consider [`FileBackedAccumulator`] which trades CPU/memory
+/// efficiency for unbounded scalability via disk-backed storage.
 pub struct InMemoryAccumulator {
-    /// Accumulated summary statistics.
+    /// Rolling summary statistics maintained incrementally.
     summary: Summary,
-    /// Vector of all file statistics.
+
+    /// Chronologically ordered collection of all accumulated file statistics.
     files: Vec<FileStats>,
 }
 
@@ -165,11 +314,21 @@ impl Default for InMemoryAccumulator {
 }
 
 impl InMemoryAccumulator {
-    /// Creates a new in-memory accumulator.
+    /// Constructs a pristine accumulator with zero accumulated statistics.
+    ///
+    /// Initializes internal data structures with optimal default capacity,
+    /// ready to receive file statistics via `add_file()`.
     ///
     /// # Returns
     ///
-    /// A new `InMemoryAccumulator` instance with empty statistics
+    /// Fresh `InMemoryAccumulator` instance with empty summary and zero files
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut acc = InMemoryAccumulator::new();
+    /// assert_eq!(acc.get_summary().files, 0);
+    /// ```
     pub fn new() -> Self {
         Self {
             summary: Summary::default(),
@@ -194,32 +353,67 @@ impl StatsAccumulator for InMemoryAccumulator {
     }
 }
 
-/// File-backed accumulator for file statistics using a temporary file.
+/// Scalable disk-backed statistics accumulator for unbounded codebase analysis.
 ///
-/// Streams file statistics to a temporary file in JSON Lines format,
-/// maintaining only the running summary in memory. This allows processing
-/// arbitrarily large codebases without excessive memory consumption.
+/// Employs a streaming architecture that persists file statistics to a temporary file
+/// in [JSON Lines format](http://jsonlines.org/), retaining only aggregate summaries
+/// in memory. This design enables analysis of arbitrarily large codebases—including
+/// projects with millions of files—without risking memory exhaustion.
 ///
-/// The temporary file is automatically deleted when the accumulator is dropped.
+/// # Architecture
+///
+/// - **Streaming Writes**: File statistics serialized and appended immediately upon `add_file()`
+/// - **Buffered I/O**: 8MB write buffer minimizes syscall overhead
+/// - **Automatic Cleanup**: Temporary file deleted automatically via RAII when dropped
+/// - **JSON Lines Format**: One complete JSON object per line, facilitating line-oriented processing
+///
+/// # Performance Considerations
+///
+/// - **Memory**: O(1) - only summary statistics retained in RAM
+/// - **Disk I/O**: Sequential writes optimized for modern SSD/HDD characteristics
+/// - **Iteration**: Requires sequential read-through of temporary file
+///
+/// # Use Cases
+///
+/// - Analyzing monolithic monorepos with extensive file counts
+/// - CI/CD environments with constrained memory allocations
+/// - Historical analysis across thousands of revisions
 pub struct FileBackedAccumulator {
-    /// Running summary statistics.
+    /// In-memory rolling summary, incrementally updated with each file.
     summary: Summary,
-    /// Temporary file for storing file statistics.
+
+    /// Self-deleting temporary file handle for persistent statistics storage.
     temp_file: NamedTempFile,
-    /// Buffered writer for efficient I/O.
+
+    /// High-capacity buffered writer minimizing I/O syscalls.
     writer: BufWriter<std::fs::File>,
 }
 
 impl FileBackedAccumulator {
-    /// Creates a new file-backed accumulator with a temporary file.
+    /// Constructs a new disk-backed accumulator with ephemeral temporary storage.
+    ///
+    /// Allocates a system-managed temporary file for statistics persistence and initializes
+    /// an 8MB write buffer for optimal I/O performance. The temporary file is automatically
+    /// cleaned up upon object destruction, ensuring no disk space leakage.
     ///
     /// # Returns
     ///
-    /// A new `FileBackedAccumulator` instance
+    /// Initialized `FileBackedAccumulator` ready to receive statistics, or an error
+    /// if system resources are unavailable
     ///
     /// # Errors
     ///
-    /// Returns an error if the temporary file cannot be created
+    /// Returns `Err` if:
+    /// - Temporary file creation fails (insufficient disk space, permission issues)
+    /// - File descriptor limits are exceeded
+    /// - Temporary directory is inaccessible
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut acc = FileBackedAccumulator::new()?;
+    /// // Accumulator ready for use with automatic cleanup on drop
+    /// ```
     pub fn new() -> Result<Self, String> {
         let temp_file = NamedTempFile::new().map_err(|e| {
             format!(
@@ -305,12 +499,22 @@ impl StatsAccumulator for FileBackedAccumulator {
     }
 }
 
-/// Output format for the report.
+/// Serialization format selector for statistical output.
+///
+/// Determines the encoding and structure of analysis results, enabling consumption
+/// by both human readers and automated tooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
-    /// Plain text format (default).
+    /// Human-readable hierarchical text format with indented structure (default).
+    ///
+    /// Optimized for terminal display and manual inspection, presenting statistics
+    /// in a tree-like layout with clear visual hierarchy.
     Text,
-    /// JSON format.
+
+    /// Machine-parseable JSON format conforming to the [`Report`] schema.
+    ///
+    /// Suitable for integration with CI/CD pipelines, static analysis tools,
+    /// and custom reporting dashboards. Pretty-printed for readability.
     Json,
 }
 
@@ -388,16 +592,42 @@ impl Args {
     }
 }
 
-/// Classifies line types in source code.
+/// Mutually exclusive taxonomy for source code line classification.
+///
+/// Represents the fundamental categorization scheme applied during line-level analysis.
+/// Each line in a source file maps to exactly one variant, forming a complete partition
+/// of the source code space.
+///
+/// # Classification Priority
+///
+/// When lines contain multiple token types, classification follows this precedence:
+/// 1. Rustdoc (highest priority)
+/// 2. Comment
+/// 3. Code
+/// 4. Blank (lowest priority - default assumption)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineType {
-    /// Line contains only whitespace.
+    /// Lines consisting exclusively of whitespace characters (spaces, tabs, newlines).
+    ///
+    /// Examples: empty lines, lines with only indentation
     Blank,
-    /// Line is part of a regular comment.
+
+    /// Standard non-documentation comment lines.
+    ///
+    /// Includes `//` line comments and `/* */` block comments, excluding
+    /// documentation variants recognized by rustdoc.
     Comment,
-    /// Line is part of a rustdoc comment.
+
+    /// Documentation comment lines recognized by rustdoc.
+    ///
+    /// Comprises `///`, `//!`, `/**`, and `/*!` comment forms that generate
+    /// API documentation when processed by rustdoc.
     Rustdoc,
-    /// Line contains code.
+
+    /// Executable code lines containing declarations, expressions, or statements.
+    ///
+    /// Encompasses all Rust syntax elements beyond comments and whitespace,
+    /// including keywords, identifiers, operators, literals, and punctuation.
     Code,
 }
 
@@ -550,19 +780,44 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Analyzes the content of source code to classify each line as blank, comment, or code.
+/// Performs AST-driven line-by-line classification of Rust source code.
 ///
-/// Uses the Rust syntax parser to properly tokenize the code, correctly handling
-/// string literals, raw strings, and character literals. This ensures that comment-like
-/// patterns inside strings are not misclassified as actual comments.
+/// Leverages the `ra_ap_syntax` parser to tokenize source content with full semantic awareness,
+/// correctly disambiguating comment-like patterns within string literals, raw strings, and
+/// character constants. Each line receives a deterministic classification based on its
+/// predominant token type.
+///
+/// # Algorithm
+///
+/// 1. Parse source into syntax tree via `SourceFile::parse`
+/// 2. Build byte-offset-to-line-number mapping for O(log n) lookups
+/// 3. Traverse all tokens, classifying covered lines according to token kinds
+/// 4. Resolve conflicts (e.g., code + comment on same line) via precedence rules
+///
+/// # Classification Rules
+///
+/// - Lines with only whitespace tokens → `LineType::Blank`
+/// - Lines with `COMMENT` tokens matching `///|//!|/**|/*!` → `LineType::Rustdoc`
+/// - Lines with other `COMMENT` tokens → `LineType::Comment`
+/// - Lines with any non-whitespace, non-comment tokens → `LineType::Code`
+/// - Mixed lines prioritize Comment/Rustdoc over Code
 ///
 /// # Arguments
 ///
-/// * `content` - The source code content to analyze
+/// * `content` - Complete source file content as UTF-8 string
 ///
 /// # Returns
 ///
-/// A vector of `LineType` values, one for each line in the content
+/// Vector of [`LineType`] classifications, indexed by zero-based line number
+///
+/// # Examples
+///
+/// ```ignore
+/// let code = "// comment\nfn main() {}\n";
+/// let types = analyze_lines(code);
+/// assert_eq!(types[0], LineType::Comment);
+/// assert_eq!(types[1], LineType::Code);
+/// ```
 fn analyze_lines(content: &str) -> Vec<LineType> {
     let total_lines = content.lines().count();
     if total_lines == 0 {
