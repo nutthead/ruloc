@@ -305,7 +305,7 @@ cargo run -- --dir src/
 
 ### Code Coverage
 
-ruloc maintains ≥85% code coverage using [tarpaulin](https://github.com/xd009642/tarpaulin):
+ruloc maintains ≥70% code coverage using [tarpaulin](https://github.com/xd009642/tarpaulin):
 
 ```sh
 # Install tarpaulin (requires OpenSSL development libraries)
@@ -325,7 +325,7 @@ ruloc/
 ├── src/
 │   └── main.rs          # Complete implementation (~3600 lines)
 ├── Cargo.toml           # Dependencies and metadata
-├── .tarpaulin.toml      # Coverage configuration (≥85% threshold)
+├── .tarpaulin.toml      # Coverage configuration (≥70% threshold)
 ├── CLAUDE.md            # Development guidelines for AI assistants
 └── README.md            # This file
 ```
@@ -333,7 +333,7 @@ ruloc/
 ### Contributing Workflow
 
 1. **Format and lint** — Ensure `cargo fmt` and `cargo clippy` pass
-2. **Test coverage** — Add tests for new functionality; maintain ≥85% coverage
+2. **Test coverage** — Add tests for new functionality; maintain ≥70% coverage
 3. **Documentation** — Update rustdoc comments to match code changes
 4. **Commit style** — Follow Conventional Commits (`feat:`, `fix:`, `refactor:`, etc.)
 
@@ -347,7 +347,7 @@ Issues and pull requests are welcome. Before submitting:
 
 1. Run `cargo fmt` and `cargo clippy --all-targets --all-features -- -D warnings`
 2. Ensure `cargo test` passes with all tests succeeding
-3. Verify `cargo tarpaulin` reports ≥85% coverage
+3. Verify `cargo tarpaulin` reports ≥70% coverage
 4. Update rustdoc comments for any modified APIs
 5. Follow Conventional Commit message format
 

@@ -1,0 +1,10 @@
+{
+  "name": "coverage-comment",
+  "version": "1.0.0",
+  "description": "Dependencies for CI coverage PR comment script",
+  "private": true,
+  "dependencies": {
+    "fast-xml-parser": "5.2.5",
+    "dedent": "1.7.0"
+  }
+}

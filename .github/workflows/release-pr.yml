@@ -17,7 +17,6 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/release-pr.yml'
-      - '.tarpaulin.toml'
 
 permissions:
   contents: write
@@ -32,6 +31,7 @@ jobs:
   create-release-pr:
     name: Create Release PR
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Skip if commit message contains [skip ci] to prevent unnecessary runs
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     steps:

@@ -13,7 +13,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
   workflow_dispatch:
     inputs:
@@ -39,8 +39,6 @@ env:
   RUST_BACKTRACE: short
   # Sigstore configuration for keyless artifact signing
   COSIGN_EXPERIMENTAL: 1  # Enable experimental keyless signing
-  FULCIO_URL: https://fulcio.sigstore.dev  # Certificate authority
-  REKOR_URL: https://rekor.sigstore.dev  # Transparency log
 
 jobs:
   # Extracts and validates version from tag or manual input
@@ -48,6 +46,7 @@ jobs:
   prepare-release:
     name: Prepare Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -82,7 +81,8 @@ jobs:
 
       - name: Verify version matches Cargo.toml
         run: |
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          # Use cargo metadata for robust version parsing
+          CARGO_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
           if [[ "${{ steps.version.outputs.version }}" != "$CARGO_VERSION" ]]; then
             echo "Version mismatch: tag/input=${{ steps.version.outputs.version }} vs Cargo.toml=$CARGO_VERSION"
             exit 1
@@ -93,6 +93,7 @@ jobs:
   security-scan:
     name: Security Audit & SBOM
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [prepare-release]
     steps:
       - name: Checkout repository
@@ -149,6 +150,7 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [prepare-release]
+    timeout-minutes: 90
     strategy:
       fail-fast: false  # Continue building other targets if one fails
       matrix:
@@ -180,6 +182,7 @@ jobs:
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             use_cross: false
+            experimental: true  # Windows ARM64 support is experimental
 
           - os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
@@ -188,8 +191,10 @@ jobs:
           - os: ubuntu-latest
             target: riscv64gc-unknown-linux-gnu
             use_cross: true
+            experimental: true  # RISC-V support is experimental
 
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
     env:
       CARGO_BUILD_TARGET: ${{ matrix.target }}
     steps:
@@ -271,6 +276,7 @@ jobs:
           echo "archive=${ARCHIVE_BASENAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifacts
+        if: success()  # Only upload if build succeeded (prevents partial artifacts from experimental targets)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: binary-${{ matrix.target }}
@@ -283,6 +289,7 @@ jobs:
     name: Generate Attestations
     needs: [build-binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write  # Required for Sigstore keyless signing
@@ -315,17 +322,36 @@ jobs:
 
       - name: Sign artifacts with cosign
         run: |
-          for file in artifacts/**/*.{tar.gz,zip}; do
-            if [[ -f "$file" ]]; then
-              echo "Signing $file"
-              cosign sign-blob \
-                --yes \
-                --oidc-issuer="${FULCIO_URL}" \
-                --output-signature="${file}.sig" \
-                --output-certificate="${file}.crt" \
-                "$file"
+          set -e  # Exit on any error
+
+          # Find all archives to sign
+          ARCHIVES=$(find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \))
+
+          if [ -z "$ARCHIVES" ]; then
+            echo "❌ ERROR: No archives found to sign!"
+            exit 1
+          fi
+
+          SIGNED_COUNT=0
+          while IFS= read -r file; do
+            echo "Signing: $file"
+            cosign sign-blob \
+              --yes \
+              --oidc-issuer="https://token.actions.githubusercontent.com" \
+              --output-signature="${file}.sig" \
+              --output-certificate="${file}.crt" \
+              "$file"
+
+            # Verify signature was created
+            if [[ ! -f "${file}.sig" ]] || [[ ! -f "${file}.crt" ]]; then
+              echo "❌ ERROR: Failed to create signature for $file"
+              exit 1
             fi
-          done
+
+            ((SIGNED_COUNT++))
+          done <<< "$ARCHIVES"
+
+          echo "✅ Successfully signed $SIGNED_COUNT artifacts"
 
       - name: Upload attestation artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -340,6 +366,7 @@ jobs:
     name: Generate Changelog
     needs: [prepare-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
@@ -389,6 +416,7 @@ jobs:
     name: Publish GitHub Release
     needs: [prepare-release, build-binaries, attestation, security-scan, generate-changelog]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write  # Required to create releases
     steps:
@@ -404,8 +432,8 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
 
-          cat > release-notes.md << 'EOF'
-          ## 🚀 ruloc v${{ needs.prepare-release.outputs.version }}
+          cat > release-notes.md << EOF
+          ## 🚀 ruloc v${VERSION}
 
           ### 📊 Release Metrics
           - **SLSA Level**: 3 ✅
@@ -416,19 +444,39 @@ jobs:
           ### 📝 What's Changed
           ${{ needs.generate-changelog.outputs.changelog }}
 
-          ### 🔒 Security
-          All release artifacts are signed using Sigstore's keyless signing and include SLSA provenance attestations.
+          ### 🔒 Security & Verification
 
-          To verify signatures:
-          ```bash
-          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
-          cosign verify-blob \
-            --certificate ruloc-${VERSION}-<platform>.tar.gz.crt \
-            --signature ruloc-${VERSION}-<platform>.tar.gz.sig \
-            --certificate-identity-regexp "$WORKFLOW_ID" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            ruloc-${VERSION}-<platform>.tar.gz
-          ```
+          All release artifacts are signed using Sigstore's keyless signing with SLSA provenance.
+
+          #### Quick Verification (Linux x86_64 example)
+          \`\`\`bash
+          # Download artifact and signature
+          VERSION="${VERSION}"
+          PLATFORM="x86_64-unknown-linux-gnu"
+          ARTIFACT="ruloc-\${VERSION}-\${PLATFORM}.tar.gz"
+
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}"
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}.sig"
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}.crt"
+
+          # Verify signature
+          cosign verify-blob \\
+            --certificate "\${ARTIFACT}.crt" \\
+            --signature "\${ARTIFACT}.sig" \\
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\\.github/workflows/release\\.yml@refs/tags/v.*" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            "\${ARTIFACT}"
+          \`\`\`
+
+          #### Supported Platforms
+          Replace \`PLATFORM\` with your target:
+          - \`x86_64-unknown-linux-gnu\` (Linux x86_64 glibc)
+          - \`x86_64-unknown-linux-musl\` (Linux x86_64 musl)
+          - \`aarch64-unknown-linux-gnu\` (Linux ARM64 glibc)
+          - \`aarch64-apple-darwin\` (macOS Apple Silicon)
+          - \`x86_64-pc-windows-msvc\` (Windows x86_64)
+          - Additional platforms listed below
+          EOF
 
           ### 📦 Installation
 
@@ -485,8 +533,9 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [publish-release]
-    if: github.event.inputs.skip_publish != 'true'
+    if: github.event.inputs.skip_publish != true
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -508,6 +557,18 @@ jobs:
           cargo package --locked --allow-dirty
           cargo package --locked --list
 
+      - name: Validate cargo registry token
+        run: |
+          if [ -z "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]; then
+            echo "❌ Error: CARGO_REGISTRY_TOKEN not configured"
+            echo ""
+            echo "To publish to crates.io, add CARGO_REGISTRY_TOKEN to repository secrets:"
+            echo "1. Get token from https://crates.io/me"
+            echo "2. Add to https://github.com/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+          echo "✅ CARGO_REGISTRY_TOKEN is configured"
+
       - name: Publish to crates.io
         run: cargo publish
         env:
@@ -517,6 +578,7 @@ jobs:
     name: Verify Release
     needs: [prepare-release, publish-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
@@ -531,7 +593,7 @@ jobs:
           curl -L -o test-artifact.tar.gz.sig "${BASE_URL}/${ARTIFACT}.sig"
           curl -L -o test-artifact.tar.gz.crt "${BASE_URL}/${ARTIFACT}.crt"
 
-          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
+          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v.*"
           cosign verify-blob \
             --certificate test-artifact.tar.gz.crt \
             --signature test-artifact.tar.gz.sig \
@@ -540,21 +602,44 @@ jobs:
             test-artifact.tar.gz
 
       - name: Verify crate publication
-        if: github.event.inputs.skip_publish != 'true'
+        if: github.event.inputs.skip_publish != true
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
-          # Poll crates.io for the published version with exponential backoff (max 10 attempts, up to ~5 min)
+
+          echo "Waiting for crates.io to index version ${VERSION}..."
+
+          # Poll with exponential backoff and proper error handling
           for i in {1..10}; do
-            PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num')
-            if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
-              echo "Crate version $VERSION is available on crates.io."
-              break
+            # Fetch with error handling
+            HTTP_CODE=$(curl -s -w "%{http_code}" -o response.json \
+              "https://crates.io/api/v1/crates/ruloc/${VERSION}")
+
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              # Validate JSON before parsing
+              if ! jq empty response.json 2>/dev/null; then
+                echo "⚠️  Received invalid JSON from crates.io (attempt $i/10)"
+                sleep $((i * 10))
+                continue
+              fi
+
+              PUBLISHED_VERSION=$(jq -r '.version.num // empty' response.json)
+
+              if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
+                echo "✅ Version ${VERSION} is available on crates.io!"
+                rm response.json
+                exit 0
+              fi
+            elif [ "$HTTP_CODE" -eq 429 ]; then
+              echo "⚠️  Rate limited by crates.io (attempt $i/10)"
+            elif [ "$HTTP_CODE" -ge 500 ]; then
+              echo "⚠️  crates.io server error $HTTP_CODE (attempt $i/10)"
             else
-              echo "Crate version $VERSION not yet available on crates.io. Attempt $i/10. Retrying in $((i * 10)) seconds..."
-              sleep $((i * 10))
+              echo "⚠️  Version not found, HTTP $HTTP_CODE (attempt $i/10)"
             fi
-            if [ "$i" -eq 10 ]; then
-              echo "Crate version $VERSION did not appear on crates.io after $i attempts. Failing."
-              exit 1
-            fi
+
+            sleep $((i * 10))
           done
+
+          echo "❌ Version ${VERSION} not available after 10 attempts"
+          rm -f response.json
+          exit 1

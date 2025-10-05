@@ -3835,4 +3835,775 @@ fn test2() {}
         let size = args.parse_max_file_size().unwrap();
         assert_eq!(size, Some(102400));
     }
+
+    /// Tests is_test_node with #[cfg(test)] attribute detection.
+    #[test]
+    fn test_is_test_node_cfg_test_detection() {
+        let code = r#"
+#[cfg(test)]
+mod tests {
+    fn helper() {}
+}
+"#;
+        let parse = SourceFile::parse(code, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        // Find nodes that are detected as test nodes
+        let mut found_test_node = false;
+        for node in root.descendants() {
+            if is_test_node(&node) {
+                found_test_node = true;
+                break;
+            }
+        }
+        assert!(
+            found_test_node,
+            "Should detect #[cfg(test)] module as test node"
+        );
+    }
+
+    /// Tests output_text_from_accumulator with file stats.
+    #[test]
+    fn test_output_text_accumulator_with_data() {
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        let stats = FileStats {
+            path: "test.rs".to_string(),
+            total: LineStats {
+                all_lines: 10,
+                blank_lines: 2,
+                comment_lines: 3,
+                code_lines: 5,
+                rustdoc_lines: 1,
+            },
+            production: LineStats {
+                all_lines: 6,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 3,
+                rustdoc_lines: 1,
+            },
+            test: LineStats {
+                all_lines: 4,
+                blank_lines: 1,
+                comment_lines: 1,
+                code_lines: 2,
+                rustdoc_lines: 0,
+            },
+        };
+
+        accumulator.add_file(&stats).unwrap();
+        accumulator.flush().unwrap();
+
+        // Ensure function doesn't panic
+        let result = output_text_from_accumulator(&accumulator);
+        assert!(result.is_ok());
+    }
+
+    /// Tests output_json_from_accumulator with multiple files.
+    #[test]
+    fn test_output_json_accumulator_multi_file() {
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        let stats1 = FileStats {
+            path: "test1.rs".to_string(),
+            total: LineStats {
+                all_lines: 10,
+                blank_lines: 2,
+                comment_lines: 3,
+                code_lines: 5,
+                rustdoc_lines: 1,
+            },
+            production: LineStats {
+                all_lines: 6,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 3,
+                rustdoc_lines: 1,
+            },
+            test: LineStats {
+                all_lines: 4,
+                blank_lines: 1,
+                comment_lines: 1,
+                code_lines: 2,
+                rustdoc_lines: 0,
+            },
+        };
+
+        let stats2 = FileStats {
+            path: "test2.rs".to_string(),
+            total: LineStats {
+                all_lines: 8,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 5,
+                rustdoc_lines: 0,
+            },
+            production: LineStats {
+                all_lines: 8,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 5,
+                rustdoc_lines: 0,
+            },
+            test: LineStats::default(),
+        };
+
+        accumulator.add_file(&stats1).unwrap();
+        accumulator.add_file(&stats2).unwrap();
+        accumulator.flush().unwrap();
+
+        let result = output_json_from_accumulator(&accumulator);
+        assert!(result.is_ok());
+    }
+
+    /// Tests analyze_file respecting file size limits.
+    #[test]
+    fn test_analyze_file_with_size_limit() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_size_limited.rs");
+
+        // Create a file larger than the limit
+        let large_content = "// Large file\n".repeat(50);
+        std::fs::write(&temp_file, large_content).unwrap();
+
+        let result = analyze_file(&temp_file, Some(100));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum size"));
+
+        std::fs::remove_file(&temp_file).unwrap();
+    }
+
+    /// Tests is_test_node detects #[cfg(test)] on functions.
+    #[test]
+    fn test_is_test_node_cfg_test_on_function() {
+        let code = r#"
+#[cfg(test)]
+fn helper_function() {
+    println!("test helper");
+}
+"#;
+        let parse = SourceFile::parse(code, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        let mut found_cfg_test_fn = false;
+        for node in root.descendants() {
+            if is_test_node(&node) && ast::Fn::cast(node.clone()).is_some() {
+                found_cfg_test_fn = true;
+                break;
+            }
+        }
+        assert!(found_cfg_test_fn, "Should detect #[cfg(test)] on function");
+    }
+
+    /// Tests classify_lines with complex mixed production and test code.
+    #[test]
+    fn test_classify_lines_complex_cfg_test() {
+        let content = r#"
+// Production code
+fn prod() {}
+
+#[cfg(test)]
+fn test_helper() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test1() {}
+}
+"#;
+        let is_test = classify_lines(content);
+
+        // Should have some production and some test lines
+        let test_count = is_test.iter().filter(|&&x| x).count();
+        let prod_count = is_test.iter().filter(|&&x| !x).count();
+
+        assert!(test_count > 0, "Should detect test lines");
+        assert!(prod_count > 0, "Should detect production lines");
+    }
+
+    /// Tests accumulator get_summary with FileBackedAccumulator.
+    #[test]
+    fn test_file_backed_accumulator_get_summary() {
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        let stats1 = FileStats {
+            path: "file1.rs".to_string(),
+            total: LineStats {
+                all_lines: 100,
+                blank_lines: 10,
+                comment_lines: 20,
+                code_lines: 70,
+                rustdoc_lines: 5,
+            },
+            production: LineStats {
+                all_lines: 60,
+                blank_lines: 5,
+                comment_lines: 10,
+                code_lines: 45,
+                rustdoc_lines: 5,
+            },
+            test: LineStats {
+                all_lines: 40,
+                blank_lines: 5,
+                comment_lines: 10,
+                code_lines: 25,
+                rustdoc_lines: 0,
+            },
+        };
+
+        let stats2 = FileStats {
+            path: "file2.rs".to_string(),
+            total: LineStats {
+                all_lines: 50,
+                blank_lines: 5,
+                comment_lines: 10,
+                code_lines: 35,
+                rustdoc_lines: 2,
+            },
+            production: LineStats {
+                all_lines: 50,
+                blank_lines: 5,
+                comment_lines: 10,
+                code_lines: 35,
+                rustdoc_lines: 2,
+            },
+            test: LineStats::default(),
+        };
+
+        accumulator.add_file(&stats1).unwrap();
+        accumulator.add_file(&stats2).unwrap();
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+
+        assert_eq!(summary.files, 2);
+        assert_eq!(summary.total.all_lines, 150);
+        assert_eq!(summary.production.all_lines, 110);
+        assert_eq!(summary.test.all_lines, 40);
+    }
+
+    /// Tests analyze_directory with FileBackedAccumulator and no valid files.
+    #[test]
+    fn test_analyze_directory_file_backed_no_files() {
+        let temp_dir = std::env::temp_dir().join("test_no_files_fb");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create only a non-Rust file
+        std::fs::write(temp_dir.join("readme.md"), "Not Rust").unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No Rust files"));
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests analyze_directory with all files exceeding size limit using FileBackedAccumulator.
+    #[test]
+    fn test_analyze_directory_file_backed_all_too_large() {
+        let temp_dir = std::env::temp_dir().join("test_all_large_fb");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create large files
+        std::fs::write(temp_dir.join("big.rs"), "// ".repeat(200)).unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, Some(50), &mut accumulator);
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("No Rust files could be analyzed")
+        );
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests analyze_file and analyze_directory integration with real directory.
+    #[test]
+    fn test_integration_analyze_real_directory() {
+        let temp_dir = std::env::temp_dir().join("test_real_analysis");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create realistic Rust files
+        std::fs::write(
+            temp_dir.join("lib.rs"),
+            r#"
+//! Library documentation
+
+/// A function
+pub fn func() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_func() {}
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            temp_dir.join("main.rs"),
+            r#"
+fn main() {
+    println!("Hello");
+}
+"#,
+        )
+        .unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+
+        assert!(result.is_ok());
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+        assert!(summary.total.all_lines > 0);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests output_text_from_accumulator with both accumulators.
+    #[test]
+    fn test_output_text_integration() {
+        let mut accumulator = InMemoryAccumulator::new();
+
+        let stats = FileStats {
+            path: "sample.rs".to_string(),
+            total: LineStats {
+                all_lines: 20,
+                blank_lines: 3,
+                comment_lines: 5,
+                code_lines: 12,
+                rustdoc_lines: 2,
+            },
+            production: LineStats {
+                all_lines: 15,
+                blank_lines: 2,
+                comment_lines: 3,
+                code_lines: 10,
+                rustdoc_lines: 2,
+            },
+            test: LineStats {
+                all_lines: 5,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 2,
+                rustdoc_lines: 0,
+            },
+        };
+
+        accumulator.add_file(&stats).unwrap();
+
+        // Call output function - it prints to stdout
+        let result = output_text_from_accumulator(&accumulator);
+        assert!(result.is_ok());
+
+        // Also test with FileBackedAccumulator
+        let mut fb_acc = FileBackedAccumulator::new().unwrap();
+        fb_acc.add_file(&stats).unwrap();
+        fb_acc.flush().unwrap();
+        let result2 = output_text_from_accumulator(&fb_acc);
+        assert!(result2.is_ok());
+    }
+
+    /// Tests output_json_from_accumulator with both accumulators.
+    #[test]
+    fn test_output_json_integration() {
+        let mut accumulator = InMemoryAccumulator::new();
+
+        let stats = FileStats {
+            path: "sample.rs".to_string(),
+            total: LineStats {
+                all_lines: 20,
+                blank_lines: 3,
+                comment_lines: 5,
+                code_lines: 12,
+                rustdoc_lines: 2,
+            },
+            production: LineStats {
+                all_lines: 15,
+                blank_lines: 2,
+                comment_lines: 3,
+                code_lines: 10,
+                rustdoc_lines: 2,
+            },
+            test: LineStats {
+                all_lines: 5,
+                blank_lines: 1,
+                comment_lines: 2,
+                code_lines: 2,
+                rustdoc_lines: 0,
+            },
+        };
+
+        accumulator.add_file(&stats).unwrap();
+
+        // Call output function - it prints to stdout
+        let result = output_json_from_accumulator(&accumulator);
+        assert!(result.is_ok());
+
+        // Also test with FileBackedAccumulator
+        let mut fb_acc = FileBackedAccumulator::new().unwrap();
+        fb_acc.add_file(&stats).unwrap();
+        fb_acc.flush().unwrap();
+        let result2 = output_json_from_accumulator(&fb_acc);
+        assert!(result2.is_ok());
+    }
+
+    /// Tests Args::parse_max_file_size with completely invalid input.
+    #[test]
+    fn test_args_parse_max_file_size_invalid_format() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: false,
+            out_json: false,
+            debug: false,
+            no_color: false,
+            verbose: false,
+            max_file_size: Some("not-a-number".to_string()),
+        };
+        let result = args.parse_max_file_size();
+        assert!(result.is_err());
+    }
+
+    /// Tests analyze_directory with subdirectories containing Rust files.
+    #[test]
+    fn test_analyze_directory_with_subdirs() {
+        let temp_dir = std::env::temp_dir().join("test_subdirs");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::create_dir_all(temp_dir.join("subdir")).unwrap();
+
+        // Create files in root and subdirectory
+        std::fs::write(temp_dir.join("root.rs"), "fn root() {}").unwrap();
+        std::fs::write(temp_dir.join("subdir/nested.rs"), "fn nested() {}").unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+
+        assert!(result.is_ok());
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests analyze_file with complex code containing all line types.
+    #[test]
+    fn test_analyze_file_comprehensive_content() {
+        let temp_file = std::env::temp_dir().join("comprehensive.rs");
+
+        let content = r#"
+//! Module docs
+
+// Regular comment
+
+/// Rustdoc for function
+fn production_fn() {
+    // Implementation
+    println!("prod");
+}
+
+#[cfg(test)]
+mod tests {
+    /// Test docs
+    #[test]
+    fn test_something() {
+        assert!(true);
+    }
+
+    #[cfg(test)]
+    fn helper() {}
+}
+"#;
+
+        std::fs::write(&temp_file, content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.total.all_lines > 0);
+        assert!(stats.production.all_lines > 0);
+        assert!(stats.test.all_lines > 0);
+        assert!(stats.total.rustdoc_lines > 0);
+        assert!(stats.total.comment_lines > 0);
+        assert!(stats.total.blank_lines > 0);
+
+        std::fs::remove_file(&temp_file).unwrap();
+    }
+
+    /// Tests end-to-end workflow: create files, analyze, output.
+    #[test]
+    fn test_end_to_end_workflow() {
+        let temp_dir = std::env::temp_dir().join("test_e2e");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create multiple Rust files
+        std::fs::write(
+            temp_dir.join("file1.rs"),
+            "fn main() {\n    println!(\"test\");\n}\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            temp_dir.join("file2.rs"),
+            r#"
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test() {}
+}
+"#,
+        )
+        .unwrap();
+
+        // Analyze with FileBackedAccumulator
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+        assert!(result.is_ok());
+
+        accumulator.flush().unwrap();
+
+        // Output both formats
+        let text_result = output_text_from_accumulator(&accumulator);
+        assert!(text_result.is_ok());
+
+        let json_result = output_json_from_accumulator(&accumulator);
+        assert!(json_result.is_ok());
+
+        // Verify summary
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests analyze_directory handles file iteration and accumulation correctly.
+    #[test]
+    fn test_analyze_directory_accumulation() {
+        let temp_dir = std::env::temp_dir().join("test_accumulation");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create several Rust files with varying content
+        for i in 1..=5 {
+            let content = format!(
+                "// File {}\nfn func{}() {{}}\n\n#[cfg(test)]\nmod tests{} {{}}\n",
+                i, i, i
+            );
+            std::fs::write(temp_dir.join(format!("file{}.rs", i)), content).unwrap();
+        }
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+
+        assert!(result.is_ok());
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 5);
+        assert!(summary.total.all_lines > 0);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests multiple consecutive analyze operations with same accumulator.
+    #[test]
+    fn test_multiple_analyze_operations() {
+        let temp_dir1 = std::env::temp_dir().join("test_multi_1");
+        let temp_dir2 = std::env::temp_dir().join("test_multi_2");
+        std::fs::create_dir_all(&temp_dir1).unwrap();
+        std::fs::create_dir_all(&temp_dir2).unwrap();
+
+        std::fs::write(temp_dir1.join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(temp_dir2.join("b.rs"), "fn b() {}").unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        // Analyze first directory
+        analyze_directory(&temp_dir1, None, &mut accumulator).unwrap();
+        // Analyze second directory
+        analyze_directory(&temp_dir2, None, &mut accumulator).unwrap();
+
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+
+        std::fs::remove_dir_all(&temp_dir1).unwrap();
+        std::fs::remove_dir_all(&temp_dir2).unwrap();
+    }
+
+    /// Tests FileBackedAccumulator iteration works correctly after flush.
+    #[test]
+    fn test_file_backed_accumulator_iteration_after_flush() {
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        for i in 1..=3 {
+            let stats = FileStats {
+                path: format!("file{}.rs", i),
+                total: LineStats {
+                    all_lines: i * 10,
+                    blank_lines: i,
+                    comment_lines: i * 2,
+                    code_lines: i * 7,
+                    rustdoc_lines: 0,
+                },
+                production: LineStats {
+                    all_lines: i * 10,
+                    blank_lines: i,
+                    comment_lines: i * 2,
+                    code_lines: i * 7,
+                    rustdoc_lines: 0,
+                },
+                test: LineStats::default(),
+            };
+            accumulator.add_file(&stats).unwrap();
+        }
+
+        accumulator.flush().unwrap();
+
+        // Iterate and verify
+        let files: Vec<_> = accumulator.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].path, "file1.rs");
+        assert_eq!(files[1].path, "file2.rs");
+        assert_eq!(files[2].path, "file3.rs");
+    }
+
+    /// Tests analyze_directory with very large directory (many files).
+    #[test]
+    fn test_analyze_directory_many_files() {
+        let temp_dir = std::env::temp_dir().join("test_many_files");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create 10 files to test bulk operations
+        for i in 1..=10 {
+            let content = format!("fn func{}() {{}}\n", i);
+            std::fs::write(temp_dir.join(format!("file{}.rs", i)), content).unwrap();
+        }
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+
+        assert!(result.is_ok());
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 10);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests analyze_file followed by analyze_directory with same accumulator.
+    #[test]
+    fn test_mixed_file_and_directory_analysis() {
+        let temp_file = std::env::temp_dir().join("single.rs");
+        let temp_dir = std::env::temp_dir().join("test_mixed");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        std::fs::write(&temp_file, "fn single() {}").unwrap();
+        std::fs::write(temp_dir.join("dir.rs"), "fn dir() {}").unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+
+        // Analyze single file
+        let file_stats = analyze_file(&temp_file, None).unwrap();
+        accumulator.add_file(&file_stats).unwrap();
+
+        // Analyze directory
+        analyze_directory(&temp_dir, None, &mut accumulator).unwrap();
+
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+
+        std::fs::remove_file(&temp_file).unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    /// Tests output functions handle empty accumulator gracefully.
+    #[test]
+    fn test_output_with_empty_accumulator() {
+        let accumulator = InMemoryAccumulator::new();
+
+        // Both should work even with no files
+        let text_result = output_text_from_accumulator(&accumulator);
+        assert!(text_result.is_ok());
+
+        let json_result = output_json_from_accumulator(&accumulator);
+        assert!(json_result.is_ok());
+    }
+
+    /// Tests Report serialization and deserialization.
+    #[test]
+    fn test_report_json_roundtrip() {
+        let report = Report {
+            summary: Summary {
+                files: 1,
+                total: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                    rustdoc_lines: 1,
+                },
+                production: LineStats {
+                    all_lines: 7,
+                    blank_lines: 1,
+                    comment_lines: 2,
+                    code_lines: 4,
+                    rustdoc_lines: 1,
+                },
+                test: LineStats {
+                    all_lines: 3,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 1,
+                    rustdoc_lines: 0,
+                },
+            },
+            files: vec![FileStats {
+                path: "test.rs".to_string(),
+                total: LineStats {
+                    all_lines: 10,
+                    blank_lines: 2,
+                    comment_lines: 3,
+                    code_lines: 5,
+                    rustdoc_lines: 1,
+                },
+                production: LineStats {
+                    all_lines: 7,
+                    blank_lines: 1,
+                    comment_lines: 2,
+                    code_lines: 4,
+                    rustdoc_lines: 1,
+                },
+                test: LineStats {
+                    all_lines: 3,
+                    blank_lines: 1,
+                    comment_lines: 1,
+                    code_lines: 1,
+                    rustdoc_lines: 0,
+                },
+            }],
+        };
+
+        // Serialize
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        assert!(json.contains("test.rs"));
+
+        // Deserialize
+        let deserialized: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.summary.files, 1);
+        assert_eq!(deserialized.files.len(), 1);
+    }
 }
