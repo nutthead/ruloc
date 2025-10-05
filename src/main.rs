@@ -4,6 +4,7 @@
 //! Provides detailed statistics including total, production, and test code metrics.
 
 use clap::{Parser, ValueEnum};
+use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, trace};
 use ra_ap_syntax::{AstNode, SourceFile, SyntaxKind, SyntaxNode, ast, ast::HasAttrs};
@@ -316,6 +317,14 @@ struct Args {
     #[arg(long, conflicts_with = "out_text")]
     out_json: bool,
 
+    /// Enable debug mode: show each line with type prefix (conflicts with JSON output).
+    #[arg(long, conflicts_with = "out_json")]
+    debug: bool,
+
+    /// Disable colored output in debug mode.
+    #[arg(long)]
+    no_color: bool,
+
     /// Enable verbose output for debugging.
     #[arg(long)]
     verbose: bool,
@@ -463,6 +472,38 @@ fn main() -> Result<(), String> {
 
     // Parse max file size if specified
     let max_file_size = args.parse_max_file_size()?;
+
+    // Handle debug mode separately
+    if args.debug {
+        let use_color = !args.no_color;
+
+        if let Some(file_path) = &args.file {
+            output_file_debug(file_path, use_color, max_file_size)?;
+        } else if let Some(dir_path) = &args.dir {
+            // Collect all Rust files
+            let rust_files: Vec<_> = WalkDir::new(dir_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+                .collect();
+
+            for entry in rust_files {
+                let path = entry.path();
+                // Skip files that exceed size limit
+                if let Err(e) = output_file_debug(path, use_color, max_file_size) {
+                    eprintln!("Warning: {}", e);
+                    continue;
+                }
+                println!(); // Blank line between files
+            }
+        } else {
+            eprintln!("Error: Either --file or --dir must be specified.\n");
+            eprintln!("Use --help for more information.");
+            std::process::exit(1);
+        }
+
+        return Ok(());
+    }
 
     // Create file-backed accumulator for memory-efficient processing
     let mut accumulator = FileBackedAccumulator::new()?;
@@ -968,6 +1009,94 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
         prefix,
         stats.code_lines
     )
+}
+
+/// Formats a single line for debug output with type prefix and optional coloring.
+///
+/// # Arguments
+///
+/// * `line` - The line content to display
+/// * `line_type` - The type of line (Blank, Comment, Rustdoc, Code)
+/// * `is_test` - Whether this line is in test code
+/// * `use_color` - Whether to apply color to the prefix
+///
+/// # Returns
+///
+/// A formatted string with prefix and line content
+fn format_debug_line(line: &str, line_type: LineType, is_test: bool, use_color: bool) -> String {
+    let (prefix, colored_prefix) = match (is_test, line_type) {
+        (false, LineType::Blank) => ("PB", "PB".bright_black()),
+        (false, LineType::Comment) => ("PM", "PM".green()),
+        (false, LineType::Rustdoc) => ("PR", "PR".bright_green()),
+        (false, LineType::Code) => ("PC", "PC".blue()),
+        (true, LineType::Blank) => ("TB", "TB".bright_black()),
+        (true, LineType::Comment) => ("TM", "TM".yellow()),
+        (true, LineType::Rustdoc) => ("TR", "TR".bright_yellow()),
+        (true, LineType::Code) => ("TC", "TC".magenta()),
+    };
+
+    if use_color {
+        format!("{}  {}", colored_prefix, line)
+    } else {
+        format!("{}  {}", prefix, line)
+    }
+}
+
+/// Outputs a single file in debug mode with line-by-line type annotations.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file to analyze
+/// * `use_color` - Whether to apply color to the prefixes
+/// * `max_file_size` - Optional maximum file size limit
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error message if analysis fails
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or analyzed
+fn output_file_debug(
+    path: &Path,
+    use_color: bool,
+    max_file_size: Option<u64>,
+) -> Result<(), String> {
+    // Check file size if limit is specified
+    if let Some(max_size) = max_file_size {
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?;
+        let file_size = metadata.len();
+
+        if file_size > max_size {
+            return Err(format!(
+                "File {} ({} bytes) exceeds maximum size ({} bytes)",
+                path.display(),
+                file_size,
+                max_size
+            ));
+        }
+    }
+
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    if content.is_empty() {
+        return Ok(());
+    }
+
+    let line_types = analyze_lines(&content);
+    let is_test_line = classify_lines(&content);
+
+    println!("{}:", path.display());
+    for (i, line) in content.lines().enumerate() {
+        if i < line_types.len() && i < is_test_line.len() {
+            let formatted = format_debug_line(line, line_types[i], is_test_line[i], use_color);
+            println!("{}", formatted);
+        }
+    }
+
+    Ok(())
 }
 
 /// Outputs statistics in plain text format from an accumulator.
@@ -1484,6 +1613,8 @@ mod tests {
             dir: None,
             out_text: false,
             out_json: false,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: Some("10MB".to_string()),
         };
@@ -1499,6 +1630,8 @@ mod tests {
             dir: None,
             out_text: false,
             out_json: false,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: None,
         };
@@ -1514,6 +1647,8 @@ mod tests {
             dir: None,
             out_text: false,
             out_json: true,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: None,
         };
@@ -1528,6 +1663,8 @@ mod tests {
             dir: None,
             out_text: false,
             out_json: false,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: None,
         };
@@ -1943,6 +2080,8 @@ mod tests {
             dir: None,
             out_text: false,
             out_json: false,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: Some("invalid".to_string()),
         };
@@ -2279,6 +2418,8 @@ fn more_production() {}
             dir: None,
             out_text: true,
             out_json: false,
+            debug: false,
+            no_color: false,
             verbose: false,
             max_file_size: None,
         };
@@ -2794,5 +2935,25 @@ code();"#;
         assert_ne!(blank, comment);
         assert_ne!(blank, code);
         assert_ne!(comment, code);
+    }
+
+    /// Tests format_debug_line for all line type combinations.
+    #[test]
+    fn test_format_debug_line() {
+        // Test production code prefixes
+        let line = "fn main() {}";
+        assert!(format_debug_line(line, LineType::Code, false, false).starts_with("PC  "));
+        assert!(format_debug_line(line, LineType::Comment, false, false).starts_with("PM  "));
+        assert!(format_debug_line(line, LineType::Rustdoc, false, false).starts_with("PR  "));
+        assert!(format_debug_line("", LineType::Blank, false, false).starts_with("PB  "));
+
+        // Test test code prefixes
+        assert!(format_debug_line(line, LineType::Code, true, false).starts_with("TC  "));
+        assert!(format_debug_line(line, LineType::Comment, true, false).starts_with("TM  "));
+        assert!(format_debug_line(line, LineType::Rustdoc, true, false).starts_with("TR  "));
+        assert!(format_debug_line("", LineType::Blank, true, false).starts_with("TB  "));
+
+        // Verify line content is preserved
+        assert!(format_debug_line(line, LineType::Code, false, false).contains(line));
     }
 }
