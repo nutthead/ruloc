@@ -212,7 +212,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      issues: write  # Needed for PR coverage comments via issues.createComment
+      pull-requests: write  # Required to post coverage comments on PRs
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
