@@ -430,8 +430,8 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
 
-          cat > release-notes.md << 'EOF'
-          ## 🚀 ruloc v${{ needs.prepare-release.outputs.version }}
+          cat > release-notes.md << EOF
+          ## 🚀 ruloc v${VERSION}
 
           ### 📊 Release Metrics
           - **SLSA Level**: 3 ✅
@@ -442,19 +442,39 @@ jobs:
           ### 📝 What's Changed
           ${{ needs.generate-changelog.outputs.changelog }}
 
-          ### 🔒 Security
-          All release artifacts are signed using Sigstore's keyless signing and include SLSA provenance attestations.
+          ### 🔒 Security & Verification
 
-          To verify signatures:
-          ```bash
-          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v.*"
-          cosign verify-blob \
-            --certificate ruloc-${VERSION}-<platform>.tar.gz.crt \
-            --signature ruloc-${VERSION}-<platform>.tar.gz.sig \
-            --certificate-identity-regexp "$WORKFLOW_ID" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            ruloc-${VERSION}-<platform>.tar.gz
-          ```
+          All release artifacts are signed using Sigstore's keyless signing with SLSA provenance.
+
+          #### Quick Verification (Linux x86_64 example)
+          \`\`\`bash
+          # Download artifact and signature
+          VERSION="${VERSION}"
+          PLATFORM="x86_64-unknown-linux-gnu"
+          ARTIFACT="ruloc-\${VERSION}-\${PLATFORM}.tar.gz"
+
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}"
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}.sig"
+          curl -LO "https://github.com/${{ github.repository }}/releases/download/v\${VERSION}/\${ARTIFACT}.crt"
+
+          # Verify signature
+          cosign verify-blob \\
+            --certificate "\${ARTIFACT}.crt" \\
+            --signature "\${ARTIFACT}.sig" \\
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\\.github/workflows/release\\.yml@refs/tags/v.*" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            "\${ARTIFACT}"
+          \`\`\`
+
+          #### Supported Platforms
+          Replace \`PLATFORM\` with your target:
+          - \`x86_64-unknown-linux-gnu\` (Linux x86_64 glibc)
+          - \`x86_64-unknown-linux-musl\` (Linux x86_64 musl)
+          - \`aarch64-unknown-linux-gnu\` (Linux ARM64 glibc)
+          - \`aarch64-apple-darwin\` (macOS Apple Silicon)
+          - \`x86_64-pc-windows-msvc\` (Windows x86_64)
+          - Additional platforms listed below
+          EOF
 
           ### 📦 Installation
 

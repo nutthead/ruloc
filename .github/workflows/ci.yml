@@ -256,18 +256,35 @@ jobs:
           name: codecov-umbrella
           fail_ci_if_error: false
 
+      - name: Determine if PR comment should be posted
+        id: check-pr
+        if: always()
+        run: |
+          SHOULD_COMMENT="false"
+
+          # Check all required conditions
+          if [[ "${{ github.event_name }}" == "pull_request" ]] && \
+             [[ "${{ github.event.pull_request.head.repo.fork }}" == "false" ]] && \
+             [[ -f "target/tarpaulin/cobertura.xml" ]]; then
+            SHOULD_COMMENT="true"
+          fi
+
+          echo "should_comment=${SHOULD_COMMENT}" >> "$GITHUB_OUTPUT"
+          echo "PR comment needed: ${SHOULD_COMMENT}"
+
       - name: Install coverage parser
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false && hashFiles('target/tarpaulin/cobertura.xml') != ''
-        run: npm install fast-xml-parser@5.2.5 dedent@1.7.0 --no-save
+        if: always() && steps.check-pr.outputs.should_comment == 'true'
+        working-directory: .github/scripts/coverage-comment
+        run: npm ci
 
       - name: Comment coverage on PR
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false && hashFiles('target/tarpaulin/cobertura.xml') != ''
+        if: always() && steps.check-pr.outputs.should_comment == 'true'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const fs = require('fs');
-            const { XMLParser } = require('fast-xml-parser');
-            const dedent = require('dedent');
+            const { XMLParser } = require('.github/scripts/coverage-comment/node_modules/fast-xml-parser');
+            const dedent = require('.github/scripts/coverage-comment/node_modules/dedent');
 
             const parser = new XMLParser({
               ignoreAttributes: false,
@@ -368,7 +385,14 @@ jobs:
   # Final status check required by branch protection
   ci-success:
     name: CI Success
-    if: always()
+    # Use GitHub's native conditional syntax for clearer intent
+    # Job runs only if all critical jobs pass and security doesn't fail
+    if: |
+      always() &&
+      needs.quick-check.result == 'success' &&
+      needs.unit-tests.result == 'success' &&
+      needs.coverage.result == 'success' &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped')
     needs: [quick-check, security, unit-tests, coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -376,25 +400,8 @@ jobs:
       contents: read
       checks: write  # Needed for merge queue status checks
     steps:
-      - name: Check status
-        run: |
-          # Check critical jobs (must pass)
-          if [[ "${{ needs.quick-check.result }}" != "success" ]] ||
-             [[ "${{ needs.unit-tests.result }}" != "success" ]] ||
-             [[ "${{ needs.coverage.result }}" != "success" ]]; then
-            echo "❌ CI failed"
-            exit 1
-          fi
-
-          # Check security job (allow success or skipped, but warn on failure)
-          if [[ "${{ needs.security.result }}" == "failure" ]]; then
-            echo "⚠️  Security audit failed - review required"
-            echo "This is informational but indicates potential issues"
-            # Uncomment to make security blocking:
-            # exit 1
-          fi
-
-          echo "✅ All CI checks passed"
+      - name: Report success
+        run: echo "✅ All CI checks passed"
 
       - name: Set merge queue status
         if: github.event_name == 'merge_group'
