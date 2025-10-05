@@ -6,7 +6,7 @@
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{debug, trace};
-use ra_ap_syntax::{AstNode, SourceFile, SyntaxNode, ast, ast::HasAttrs};
+use ra_ap_syntax::{AstNode, SourceFile, SyntaxKind, SyntaxNode, ast, ast::HasAttrs};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -488,8 +488,9 @@ fn main() -> Result<(), String> {
 
 /// Analyzes the content of source code to classify each line as blank, comment, or code.
 ///
-/// Handles both line comments (`//`) and block comments (`/* */`), tracking
-/// multiline block comment state across lines.
+/// Uses the Rust syntax parser to properly tokenize the code, correctly handling
+/// string literals, raw strings, and character literals. This ensures that comment-like
+/// patterns inside strings are not misclassified as actual comments.
 ///
 /// # Arguments
 ///
@@ -499,42 +500,66 @@ fn main() -> Result<(), String> {
 ///
 /// A vector of `LineType` values, one for each line in the content
 fn analyze_lines(content: &str) -> Vec<LineType> {
-    let mut line_types = Vec::new();
-    let mut in_block_comment = false;
+    let total_lines = content.lines().count();
+    if total_lines == 0 {
+        return Vec::new();
+    }
 
-    for line in content.lines() {
-        let trimmed = line.trim();
+    // Parse the content to get tokens
+    let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+    let root = parse.syntax_node();
 
-        if trimmed.is_empty() {
-            line_types.push(LineType::Blank);
-            continue;
+    // Initialize all lines as blank
+    let mut line_types = vec![LineType::Blank; total_lines];
+
+    // Build line start positions for accurate mapping
+    let mut line_starts = vec![0];
+    for (pos, ch) in content.char_indices() {
+        if ch == '\n' {
+            line_starts.push(pos + 1);
         }
+    }
 
-        // Check for block comment start/end
-        if in_block_comment {
-            line_types.push(LineType::Comment);
-            if trimmed.contains("*/") {
-                in_block_comment = false;
+    // Helper to map byte offset to line number
+    let offset_to_line = |offset: usize| -> usize {
+        line_starts
+            .binary_search(&offset)
+            .unwrap_or_else(|insert_pos| insert_pos.saturating_sub(1))
+            .min(total_lines - 1)
+    };
+
+    // Collect all tokens and classify lines based on them
+    for token in root
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+    {
+        let range = token.text_range();
+        let start_offset: usize = range.start().into();
+        let end_offset: usize = range.end().into();
+
+        let start_line = offset_to_line(start_offset);
+        let end_line = offset_to_line(end_offset.saturating_sub(1).max(start_offset));
+
+        // Classify based on token kind
+        match token.kind() {
+            SyntaxKind::COMMENT => {
+                // Mark all lines covered by this comment token as Comment
+                line_types[start_line..=end_line.min(total_lines - 1)]
+                    .iter_mut()
+                    .for_each(|t| *t = LineType::Comment);
             }
-            continue;
-        }
-
-        if trimmed.starts_with("/*") {
-            line_types.push(LineType::Comment);
-            if !trimmed.contains("*/") {
-                in_block_comment = true;
+            SyntaxKind::WHITESPACE => {
+                // Whitespace doesn't change classification
             }
-            continue;
+            _ => {
+                // Any other token (keywords, identifiers, literals, etc.) is Code
+                // But only override if the line isn't already marked as Comment
+                line_types[start_line..=end_line.min(total_lines - 1)]
+                    .iter_mut()
+                    .filter(|t| **t != LineType::Comment)
+                    .for_each(|t| *t = LineType::Code);
+            }
         }
-
-        // Line comments or doc comments
-        if trimmed.starts_with("//") {
-            line_types.push(LineType::Comment);
-            continue;
-        }
-
-        // Otherwise, it's code
-        line_types.push(LineType::Code);
     }
 
     line_types
