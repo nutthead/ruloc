@@ -1,7 +1,33 @@
 [package]
 name = "ruloc"
 version = "0.1.0"
+authors = ["Behrang Saeedzadeh <hello@behrang.org>"]
 edition = "2024"
+rust-version = "1.90.0"
+readme = "README.md"
+homepage = "https://github.com/nutthead/samoyed"
+repository = "https://github.com/nutthead/samoyed"
+license = "MIT"
+description = "A fast, single-purpose CLI tool to analyze Rust codebase metrics with test/production breakdowns"
+keywords = ["loc", "lines-of-code", "tokei"]
+exclude = [
+    ".claude/",
+    ".github/",
+    ".gitignore",
+    ".samoyed/",
+    ".docs/",
+    ".assets/",
+    ".cargo/",
+    ".markdownlint.json",
+    ".tarpaulin.toml",
+    ".release-plz.toml",
+    "clippy.toml",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "flake.nix",
+    "flake.lock",
+    "tmp/",
+]
 
 [[bin]]
 name = "ruloc"
