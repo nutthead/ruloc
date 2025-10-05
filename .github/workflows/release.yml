@@ -316,17 +316,36 @@ jobs:
 
       - name: Sign artifacts with cosign
         run: |
-          for file in artifacts/**/*.{tar.gz,zip}; do
-            if [[ -f "$file" ]]; then
-              echo "Signing $file"
-              cosign sign-blob \
-                --yes \
-                --oidc-issuer="https://token.actions.githubusercontent.com" \
-                --output-signature="${file}.sig" \
-                --output-certificate="${file}.crt" \
-                "$file"
+          set -e  # Exit on any error
+
+          # Find all archives to sign
+          ARCHIVES=$(find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \))
+
+          if [ -z "$ARCHIVES" ]; then
+            echo "❌ ERROR: No archives found to sign!"
+            exit 1
+          fi
+
+          SIGNED_COUNT=0
+          while IFS= read -r file; do
+            echo "Signing: $file"
+            cosign sign-blob \
+              --yes \
+              --oidc-issuer="https://token.actions.githubusercontent.com" \
+              --output-signature="${file}.sig" \
+              --output-certificate="${file}.crt" \
+              "$file"
+
+            # Verify signature was created
+            if [[ ! -f "${file}.sig" ]] || [[ ! -f "${file}.crt" ]]; then
+              echo "❌ ERROR: Failed to create signature for $file"
+              exit 1
             fi
-          done
+
+            ((SIGNED_COUNT++))
+          done <<< "$ARCHIVES"
+
+          echo "✅ Successfully signed $SIGNED_COUNT artifacts"
 
       - name: Upload attestation artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

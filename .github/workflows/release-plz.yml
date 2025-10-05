@@ -46,6 +46,13 @@ jobs:
       - name: Check for version change
         id: check
         run: |
+          # Check if HEAD~1 exists (handles first commit case)
+          if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            echo "First commit detected - no previous version to compare"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if git diff HEAD~1 HEAD --name-only | grep -q "^Cargo.toml$"; then
             PREV_VERSION=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
             CURR_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)

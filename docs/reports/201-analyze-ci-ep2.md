@@ -9,15 +9,19 @@
 
 ## Executive Summary
 
-The ruloc GitHub Actions workflows demonstrate **excellent security posture** with all actions pinned to commit SHAs, properly scoped permissions, and comprehensive attestation/signing infrastructure. The recent security review successfully addressed 12 findings including OIDC configuration, permission scoping, and identity verification.
+The ruloc GitHub Actions workflows demonstrate **excellent security posture** with all actions pinned to commit SHAs,
+properly scoped permissions, and comprehensive attestation/signing infrastructure. The recent security review
+successfully addressed 12 findings including OIDC configuration, permission scoping, and identity verification.
 
 **Current Status:**
+
 - ✅ **0 Critical Issues** - No security vulnerabilities requiring immediate action
 - ⚠️ **3 High Priority Issues** - Reliability and edge case handling
 - 📋 **8 Medium Priority Issues** - Best practices and maintainability
 - 💡 **6 Low Priority Issues** - Minor optimizations and improvements
 
 **Key Strengths:**
+
 - All 44 action invocations pinned to full commit SHA (security best practice)
 - Sigstore/Cosign keyless signing with SLSA Level 3 provenance
 - Comprehensive permission scoping (read-only by default, escalated per job)
@@ -25,6 +29,7 @@ The ruloc GitHub Actions workflows demonstrate **excellent security posture** wi
 - Effective caching strategy with rust-cache
 
 **Priority Recommendations:**
+
 1. Add timeout-minutes to all jobs (30 min default)
 2. Fix security job exclusion from CI success check
 3. Handle first commit edge cases in release-plz workflow
@@ -49,6 +54,7 @@ The workflows have no critical security vulnerabilities or breaking configuratio
 **Impact:** Security audit failures won't prevent merges if `ci-success` job passes
 
 **Issue:**
+
 ```yaml
 # Line 94: security job has continue-on-error
 security:
@@ -60,7 +66,7 @@ security:
 ci-success:
   name: CI Success
   if: always()
-  needs: [quick-check, security, unit-tests, coverage]
+  needs: [ quick-check, security, unit-tests, coverage ]
   steps:
     - name: Check status
       run: |
@@ -74,16 +80,18 @@ ci-success:
 ```
 
 **Analysis:**
+
 - The `security` job is listed in `needs:` but its result is never validated
 - Security audits could fail completely without blocking PRs
 - This creates a false sense of security as the job appears in required checks
 
 **Recommended Fix:**
+
 ```yaml
 ci-success:
   name: CI Success
   if: always()
-  needs: [quick-check, security, unit-tests, coverage]
+  needs: [ quick-check, security, unit-tests, coverage ]
   steps:
     - name: Check status
       run: |
@@ -106,7 +114,8 @@ ci-success:
         echo "✅ All CI checks passed"
 ```
 
-**Alternative:** If security should truly be non-blocking, document this explicitly and consider using a separate status check.
+**Alternative:** If security should truly be non-blocking, document this explicitly and consider using a separate status
+check.
 
 ---
 
@@ -117,6 +126,7 @@ ci-success:
 **Impact:** Artifacts may be released unsigned without detection
 
 **Issue:**
+
 ```yaml
 - name: Sign artifacts with cosign
   run: |
@@ -134,12 +144,14 @@ ci-success:
 ```
 
 **Problems:**
+
 1. Bash brace expansion `*.{tar.gz,zip}` doesn't work with `**` glob patterns
 2. If the pattern fails to match, the loop executes once with literal string
 3. The `if [[ -f "$file" ]]` check silently skips non-existent files
 4. No verification that ANY files were signed
 
 **Recommended Fix:**
+
 ```yaml
 - name: Sign artifacts with cosign
   run: |
@@ -186,6 +198,7 @@ ci-success:
 **Impact:** Workflow fails on repositories with single commit (new projects, orphan branches)
 
 **Issue:**
+
 ```yaml
 - name: Check for version change
   id: check
@@ -196,6 +209,7 @@ ci-success:
 ```
 
 **Problems:**
+
 - `HEAD~1` doesn't exist on the first commit in a repository
 - `git diff HEAD~1 HEAD` and `git show HEAD~1:Cargo.toml` will fail with error:
   ```
@@ -203,6 +217,7 @@ ci-success:
   ```
 
 **Recommended Fix:**
+
 ```yaml
 - name: Check for version change
   id: check
@@ -245,14 +260,17 @@ ci-success:
 **Impact:** Runaway jobs consume runner minutes, delay feedback, potential DoS
 
 **Issue:**
-None of the 17 jobs across 5 workflows specify `timeout-minutes`. GitHub's default timeout is **360 minutes (6 hours)**, which is excessive for these workflows.
+None of the 17 jobs across 5 workflows specify `timeout-minutes`. GitHub's default timeout is **360 minutes (6 hours)**,
+which is excessive for these workflows.
 
 **Current Behavior:**
+
 - A hung `cargo test` could run for 6 hours
 - A stalled `cross build` for RISC-V could consume the entire runner budget
 - No automatic cleanup of infinite loops
 
 **Industry Standard:**
+
 - Fast checks: 10-15 minutes
 - Builds: 30-60 minutes
 - Release jobs: 90-120 minutes
@@ -332,6 +350,7 @@ publish:
 **Impact:** Coverage threshold failures are hidden, degrading code quality gates
 
 **Issue:**
+
 ```yaml
 - name: Install and run tarpaulin
   run: |
@@ -348,6 +367,7 @@ publish:
 ```
 
 **Problems:**
+
 1. **ALL** tarpaulin failures are masked, not just threshold violations
 2. Test failures, panics, and compilation errors exit with 0
 3. Coverage could drop to 0% and the job would pass
@@ -360,6 +380,7 @@ Current implementation allows coverage to fall below 85% without failing CI.
 
 **Analysis:**
 Tarpaulin exit codes:
+
 - 0: Success (coverage above threshold)
 - 1: Generic error (test failure, compilation error, etc.)
 - 2: Coverage below threshold (from `fail-under` config)
@@ -367,6 +388,7 @@ Tarpaulin exit codes:
 The current code treats exit code 2 and exit code 1 identically.
 
 **Recommended Fix:**
+
 ```yaml
 - name: Install and run tarpaulin
   run: |
@@ -401,11 +423,12 @@ The current code treats exit code 2 and exit code 1 identically.
 
 **Alternative (Strict Mode):**
 To enforce the 85% requirement from CLAUDE.md:
+
 ```yaml
 # Update .tarpaulin.toml
 fail-under = 85  # Changed from 80
 
-# Remove error masking entirely
+  # Remove error masking entirely
 cargo tarpaulin --timeout 120 --avoid-cfg-tarpaulin
 ```
 
@@ -420,11 +443,12 @@ cargo tarpaulin --timeout 120 --avoid-cfg-tarpaulin
 **Impact:** Maintainability, error-prone when adding new jobs
 
 **Issue:**
+
 ```yaml
 ci-success:
   name: CI Success
   if: always()
-  needs: [quick-check, security, unit-tests, coverage]
+  needs: [ quick-check, security, unit-tests, coverage ]
   steps:
     - name: Check status
       run: |
@@ -438,12 +462,14 @@ ci-success:
 ```
 
 **Problems:**
+
 1. Results checked in bash instead of job-level conditionals
 2. Easy to forget updating when adding new jobs to `needs:`
 3. `security` job is in `needs:` but not checked (per H-1)
 4. Less readable than GitHub's native conditional syntax
 
 **GitHub's Built-in Pattern:**
+
 ```yaml
 ci-success:
   name: CI Success
@@ -453,7 +479,7 @@ ci-success:
     needs.unit-tests.result == 'success' &&
     needs.coverage.result == 'success' &&
     (needs.security.result == 'success' || needs.security.result == 'skipped')
-  needs: [quick-check, security, unit-tests, coverage]
+  needs: [ quick-check, security, unit-tests, coverage ]
   runs-on: ubuntu-latest
   steps:
     - name: Report success
@@ -461,6 +487,7 @@ ci-success:
 ```
 
 **Benefits:**
+
 - Job skipped entirely if conditions not met (clearer in UI)
 - No need for bash error checking
 - Works with branch protection "required status checks"
@@ -478,6 +505,7 @@ Keep the merge queue status check step (lines 366-382) as-is, since it requires 
 **Impact:** User confusion, incorrect verification commands in documentation
 
 **Issue:**
+
 ```yaml
 - name: Generate release notes
   run: |
@@ -494,6 +522,7 @@ Keep the merge queue status check step (lines 366-382) as-is, since it requires 
 ```
 
 **Problems:**
+
 1. `@refs/tags/v.*` is a regex pattern, not a literal value
 2. Users copying this command will use the regex instead of their actual tag
 3. `<platform>` placeholder requires manual substitution
@@ -501,6 +530,7 @@ Keep the merge queue status check step (lines 366-382) as-is, since it requires 
 
 **User Experience:**
 Users see this in releases and copy-paste invalid commands:
+
 ```bash
 # ❌ What users do (incorrect):
 WORKFLOW_ID="https://github.com/nutthead/ruloc/.github/workflows/release.yml@refs/tags/v.*"
@@ -510,6 +540,7 @@ WORKFLOW_ID="https://github.com/nutthead/ruloc/.github/workflows/release.yml@ref
 ```
 
 **Recommended Fix:**
+
 ```yaml
 - name: Generate release notes
   run: |
@@ -569,25 +600,28 @@ Create `/home/amadeus/Code/nh/ruloc/docs/VERIFICATION.md` with comprehensive ver
 **Impact:** Workflow fails if `jq` is not pre-installed on runner
 
 **Issue:**
+
 ```yaml
 # Line 84
 PUBLISHED_DATA=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}")
 CREATED_AT=$(echo "$PUBLISHED_DATA" | jq -r '.version.created_at')
 
-# Line 150
+  # Line 150
 cargo metadata --format-version 1 --no-deps | jq -r '.packages[0] | {...}'
 
-# Line 175
+  # Line 175
 PUBLISHED_VERSION=$(curl -s "..." | jq -r '.version.num // empty')
 
-# Line 182
+  # Line 182
 curl -s "..." | jq -r '.version | "..."'
 ```
 
 **Problem:**
-`jq` is used 4 times without checking if it's installed. While ubuntu-latest typically includes jq, this is not guaranteed and can break on runner updates.
+`jq` is used 4 times without checking if it's installed. While ubuntu-latest typically includes jq, this is not
+guaranteed and can break on runner updates.
 
 **Recommended Fix:**
+
 ```yaml
 publish:
   name: Publish to crates.io
@@ -610,6 +644,7 @@ publish:
 
 **Alternative:**
 Use `gh api` which is guaranteed to be available and has built-in JSON parsing:
+
 ```yaml
 # Instead of:
 PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num')
@@ -627,6 +662,7 @@ PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" |
 **Impact:** Maintainability, readability, potential logic errors
 
 **Issue:**
+
 ```yaml
 - name: Install coverage parser
   if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false && hashFiles('target/tarpaulin/cobertura.xml') != ''
@@ -636,16 +672,18 @@ PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" |
 ```
 
 **Problems:**
+
 1. 90+ character conditional expression (hard to read)
 2. Duplicated across two steps (DRY violation)
 3. No short-circuit evaluation clarity
 4. `hashFiles()` returns empty string for no match (subtle behavior)
 
 **Recommended Fix:**
+
 ```yaml
 coverage:
   name: Code Coverage
-  needs: [unit-tests]
+  needs: [ unit-tests ]
   runs-on: ubuntu-latest
   permissions:
     contents: read
@@ -691,6 +729,7 @@ coverage:
 ```
 
 **Benefits:**
+
 - Single source of truth for conditional logic
 - More maintainable (change condition in one place)
 - Clearer intent with explicit "should_comment" output
@@ -705,6 +744,7 @@ coverage:
 **Impact:** Workflow logic may not work as expected
 
 **Issue:**
+
 ```yaml
 workflow_dispatch:
   inputs:
@@ -721,13 +761,16 @@ publish-crate:
 ```
 
 **Problem:**
-GitHub Actions workflow inputs declared as `type: boolean` are actual booleans in the context, not strings. Comparing `false != 'true'` always evaluates to true (since boolean false ≠ string 'true').
+GitHub Actions workflow inputs declared as `type: boolean` are actual booleans in the context, not strings. Comparing
+`false != 'true'` always evaluates to true (since boolean false ≠ string 'true').
 
 **Correct Behavior:**
+
 - When skip_publish = false (default): `false != 'true'` → true ✅ (job runs)
 - When skip_publish = true: `true != 'true'` → **true** ❌ (job runs when it shouldn't!)
 
 **Testing:**
+
 ```bash
 # Manual dispatch with skip_publish = true
 gh workflow run release.yml -f version=0.1.0 -f skip_publish=true
@@ -737,15 +780,17 @@ gh workflow run release.yml -f version=0.1.0 -f skip_publish=true
 ```
 
 **Recommended Fix:**
+
 ```yaml
 publish-crate:
   name: Publish to crates.io
-  needs: [publish-release]
+  needs: [ publish-release ]
   if: github.event.inputs.skip_publish != true  # Boolean comparison
   runs-on: ubuntu-latest
 ```
 
 **Same Issue in verify-release:**
+
 ```yaml
 # Line 544
 - name: Verify crate publication
@@ -761,12 +806,14 @@ publish-crate:
 **Impact:** Dependency version drift, no lock file verification
 
 **Issue:**
+
 ```yaml
 - name: Install coverage parser
   run: npm install fast-xml-parser@5.2.5 dedent@1.7.0 --no-save
 ```
 
 **Problems:**
+
 1. Versions hardcoded in workflow (no centralized dependency management)
 2. No integrity/checksum verification (supply chain risk)
 3. `--no-save` means no package-lock.json for reproducibility
@@ -775,6 +822,7 @@ publish-crate:
 **Recommended Fix:**
 
 **Option 1: Package.json (Preferred)**
+
 ```bash
 # Create .github/scripts/coverage-comment/package.json
 cat > .github/scripts/coverage-comment/package.json << 'EOF'
@@ -803,6 +851,7 @@ npm install
 ```
 
 **Option 2: Inline with Integrity Check**
+
 ```yaml
 - name: Install coverage parser
   run: |
@@ -815,6 +864,7 @@ npm install
 ```
 
 **Option 3: Vendored Dependencies (Most Secure)**
+
 - Pre-bundle dependencies in `.github/scripts/coverage-comment/node_modules/`
 - Check into git (controlled supply chain)
 - No runtime npm install
@@ -830,6 +880,7 @@ npm install
 **Impact:** Minor over-permissioning (checks:write granted but not used in all steps)
 
 **Issue:**
+
 ```yaml
 ci-success:
   name: CI Success
@@ -847,10 +898,12 @@ ci-success:
 ```
 
 **Analysis:**
-The `checks: write` permission is only needed for the second step (merge queue status), but it's granted to the entire job.
+The `checks: write` permission is only needed for the second step (merge queue status), but it's granted to the entire
+job.
 
 **Recommended Fix:**
-This is acceptable as GitHub doesn't support per-step permissions. The minimal permission set is already good. To further minimize:
+This is acceptable as GitHub doesn't support per-step permissions. The minimal permission set is already good. To
+further minimize:
 
 ```yaml
 # Option 1: Split into two jobs (over-engineering for this case)
@@ -887,6 +940,7 @@ ci-success-merge-queue:
 **Impact:** Artifact storage cost for failed builds, potential confusion
 
 **Issue:**
+
 ```yaml
 matrix:
   include:
@@ -911,12 +965,14 @@ steps:
 
 **Problem:**
 If an experimental build fails:
+
 1. `continue-on-error: true` allows workflow to continue
 2. Upload step runs even after failure (default: `if: success()` is NOT applied when continue-on-error is true)
 3. Partial/corrupt artifacts uploaded with "binary-riscv64gc-unknown-linux-gnu" name
 4. Downstream attestation job processes invalid artifacts
 
 **Recommended Fix:**
+
 ```yaml
 - name: Upload build artifacts
   if: success()  # Only upload if build succeeded
@@ -938,23 +994,27 @@ If an experimental build fails:
 **Impact:** Brittle parsing, fails on alternative Cargo.toml layouts
 
 **Locations:**
+
 - `/home/amadeus/Code/nh/ruloc/.github/workflows/release.yml:83`
 - `/home/amadeus/Code/nh/ruloc/.github/workflows/release-plz.yml:50-51`
 - `/home/amadeus/Code/nh/ruloc/.github/workflows/publish-crate.yml:108`
 
 **Issue:**
+
 ```bash
 # All workflows use this pattern:
 CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 ```
 
 **Assumptions:**
+
 1. Version field is at start of line (`^version`)
 2. Uses double quotes, not single quotes
 3. First match is package version (not dependency version)
 4. No comments before `version =`
 
 **Failure Cases:**
+
 ```toml
 # Case 1: Workspace with dependencies first
 [workspace]
@@ -968,13 +1028,14 @@ version = "0.1.0"
 
 # Case 2: Indented/formatted differently
 [package]
-  version = "0.1.0"  # ← Doesn't match due to leading space
+version = "0.1.0"  # ← Doesn't match due to leading space
 
 # Case 3: Single quotes
 version = '0.1.0'  # ← cut -d'"' fails
 ```
 
 **Recommended Fix:**
+
 ```bash
 # Use cargo metadata (proper approach)
 CARGO_VERSION=$(cargo metadata --format-version 1 --no-deps | \
@@ -997,6 +1058,7 @@ CARGO_VERSION=$(grep -E '^\s*version\s*=' Cargo.toml | \
 **Impact:** Inconsistent cleanup, potential storage cost variation
 
 **Locations:**
+
 ```yaml
 # ci.yml:130 - Security audit
 retention-days: 30
@@ -1018,32 +1080,35 @@ retention-days: 7
 
 **Analysis:**
 Different retention periods without clear justification:
+
 - Security reports: 30 days (CI) vs 90 days (release)
 - Build artifacts: 7 days (reasonable, released on GitHub)
 - Attestations: 90 days (good, verifiability)
 - Coverage: 90 days default (no explicit setting)
 
 **Recommended Standardization:**
+
 ```yaml
 # Establish retention policy based on artifact purpose
 
 # Short-term (7 days): Build artifacts that are released
 retention-days: 7
-- release.yml: build artifacts
-- release.yml: changelog
+  - release.yml: build artifacts
+  - release.yml: changelog
 
 # Medium-term (30 days): CI/debugging artifacts
 retention-days: 30
-- ci.yml: security audit results
-- ci.yml: coverage reports (add explicit setting)
+  - ci.yml: security audit results
+  - ci.yml: coverage reports (add explicit setting)
 
 # Long-term (90 days): Compliance/security artifacts
 retention-days: 90
-- release.yml: security scans (SBOM, audit)
-- release.yml: attestations/signatures
+  - release.yml: security scans (SBOM, audit)
+  - release.yml: attestations/signatures
 ```
 
 **Recommended Changes:**
+
 ```yaml
 # ci.yml - Add explicit coverage retention
 - name: Upload coverage to Codecov
@@ -1074,6 +1139,7 @@ retention-days: 90
 
 **Issue:**
 Multiple workflows repeat these values:
+
 ```yaml
 # Repeated in ci.yml, release.yml, publish-crate.yml, release-pr.yml, release-plz.yml
 RUST_VERSION: "1.90.0"
@@ -1087,6 +1153,7 @@ Updating Rust version requires editing 5 files.
 **Recommended Fix:**
 
 **Option 1: Reusable Workflow (Best Practice)**
+
 ```yaml
 # .github/workflows/_rust-setup.yml (reusable)
 name: Rust Setup
@@ -1113,6 +1180,7 @@ jobs:
 ```
 
 **Option 2: Centralized Config File** (Current approach is fine)
+
 ```yaml
 # Keep current approach - env vars in each workflow
 # This is explicit and clear, only 5 files to update
@@ -1130,6 +1198,7 @@ jobs:
 **Impact:** Unclear failure mode if crates.io API changes or is unavailable
 
 **Issue:**
+
 ```yaml
 - name: Verify crate publication
   run: |
@@ -1142,6 +1211,7 @@ jobs:
 ```
 
 **Recommended Fix:**
+
 ```bash
 - name: Verify crate publication
   if: github.event.inputs.skip_publish != true
@@ -1192,19 +1262,20 @@ jobs:
 
 ✅ **All Critical Security Controls Verified:**
 
-| Control | Status | Notes |
-|---------|--------|-------|
-| Action pinning (commit SHA) | ✅ PASS | 44/44 actions pinned to full SHA |
-| Permission scoping | ✅ PASS | Read-only default, job-level escalation |
-| Fork PR safety | ✅ PASS | Fork check on line 244, 248 |
-| Secret handling | ✅ PASS | All secrets in env blocks, no logging |
-| OIDC configuration | ✅ PASS | Correct issuer on line 324 |
-| Certificate identity | ✅ PASS | Regex tightened to `@refs/tags/v.*` (line 535) |
-| Sigstore signing | ✅ PASS | Keyless signing, SLSA L3 attestation |
-| Artifact attestation | ✅ PASS | Both tar.gz and zip attested |
-| Code injection prevention | ✅ PASS | No untrusted input in run blocks |
+| Control                     | Status | Notes                                          |
+|-----------------------------|--------|------------------------------------------------|
+| Action pinning (commit SHA) | ✅ PASS | 44/44 actions pinned to full SHA               |
+| Permission scoping          | ✅ PASS | Read-only default, job-level escalation        |
+| Fork PR safety              | ✅ PASS | Fork check on line 244, 248                    |
+| Secret handling             | ✅ PASS | All secrets in env blocks, no logging          |
+| OIDC configuration          | ✅ PASS | Correct issuer on line 324                     |
+| Certificate identity        | ✅ PASS | Regex tightened to `@refs/tags/v.*` (line 535) |
+| Sigstore signing            | ✅ PASS | Keyless signing, SLSA L3 attestation           |
+| Artifact attestation        | ✅ PASS | Both tar.gz and zip attested                   |
+| Code injection prevention   | ✅ PASS | No untrusted input in run blocks               |
 
 **Injection Risk Analysis:**
+
 ```yaml
 # Line 187 - SAFE: Matrix values are workflow-controlled
 run: cargo test --locked --target ${{ matrix.target }} ${{ matrix.test_args }}
@@ -1223,6 +1294,7 @@ group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
 **Current State:** Good caching strategy, effective parallelization
 
 **Optimizations Applied:**
+
 - ✅ Rust cache with Swatinem/rust-cache (hit rate: ~80%)
 - ✅ Matrix parallelization (4 platforms in unit-tests)
 - ✅ Concurrency controls (PR-level cancellation)
@@ -1249,6 +1321,7 @@ group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
    ```
 
 **Estimated Run Times:**
+
 - CI (no cache): ~15 minutes
 - CI (warm cache): ~8 minutes
 - Release: ~45-60 minutes (9 platforms, attestation, signing)
@@ -1272,12 +1345,12 @@ graph TB
 
     subgraph "Release PR Workflow"
         PUSH_MASTER[Push to master] --> RPR[create-release-pr]
-        RPR -.creates.-> PR_CREATED[Release PR]
+        RPR -. creates .-> PR_CREATED[Release PR]
     end
 
     subgraph "Release Tag Workflow"
         PR_MERGED[PR Merged] --> RPLZ[release-tag]
-        RPLZ -.creates.-> TAG[Git Tag v*.*.*]
+        RPLZ -. creates .-> TAG[Git Tag v*.*.*]
     end
 
     subgraph "Release Workflow"
@@ -1298,18 +1371,20 @@ graph TB
         MANUAL[workflow_dispatch] --> PUB[publish]
     end
 
-    style CI fill:#e1f5e1
-    style PUBREL fill:#ffe1e1
-    style TAG fill:#e1e1ff
+    style CI fill: #e1f5e1
+    style PUBREL fill: #ffe1e1
+    style TAG fill: #e1e1ff
 ```
 
 **Critical Path:**
+
 1. Code change → CI workflow (required)
 2. Merge to master → release-pr creates version bump PR
 3. Merge release PR → release-plz creates tag
 4. Tag push → release workflow (45-60 min)
 
 **Dependencies:**
+
 - Release PR requires `NH_RELEASE_PLZ_TOKEN` (to trigger CI on created PRs)
 - Release requires `CARGO_REGISTRY_TOKEN` (for crates.io publish)
 - All workflows depend on `GITHUB_TOKEN` (automatic)
@@ -1321,11 +1396,13 @@ graph TB
 ### Priority 1: Add Timeouts (Estimated time: 15 minutes)
 
 **Steps:**
+
 1. Open each workflow file
 2. Add `timeout-minutes` to each job definition
 3. Test with a workflow run
 
 **Files to modify:**
+
 ```bash
 # ci.yml
 - Line 56: Add timeout-minutes: 15 to quick-check
@@ -1341,6 +1418,7 @@ graph TB
 ```
 
 **Example diff:**
+
 ```diff
   quick-check:
     name: Quick Checks
@@ -1350,6 +1428,7 @@ graph TB
 ```
 
 **Testing:**
+
 ```bash
 # Verify no syntax errors
 gh workflow view ci.yml
@@ -1365,11 +1444,13 @@ gh workflow run ci.yml
 **File:** `.github/workflows/ci.yml`
 
 **Steps:**
+
 1. Update line 356-364 in ci-success job
 2. Add security result validation
 3. Test with security audit failure
 
 **Implementation:**
+
 ```diff
   ci-success:
     name: CI Success
@@ -1401,6 +1482,7 @@ gh workflow run ci.yml
 ```
 
 **Testing:**
+
 ```bash
 # Create a PR that triggers security failure
 # Verify ci-success behavior
@@ -1413,11 +1495,13 @@ gh workflow run ci.yml
 **File:** `.github/workflows/release-plz.yml`
 
 **Steps:**
+
 1. Add HEAD~1 existence check
 2. Handle gracefully with should_release=false
 3. Test on new branch
 
 **Implementation:**
+
 ```diff
       - name: Check for version change
         id: check
@@ -1435,6 +1519,7 @@ gh workflow run ci.yml
 ```
 
 **Testing:**
+
 ```bash
 # Create orphan branch
 git checkout --orphan test-first-commit
@@ -1452,12 +1537,14 @@ gh run watch
 **File:** `.github/workflows/release.yml`
 
 **Steps:**
+
 1. Replace bash glob with `find` command
 2. Add verification for signed count
 3. Add signature file existence checks
 4. Test with experimental target failure
 
 **Implementation:**
+
 ```diff
       - name: Sign artifacts with cosign
         run: |
@@ -1505,6 +1592,7 @@ gh run watch
 ```
 
 **Testing:**
+
 ```bash
 # Trigger release with experimental targets disabled
 # Verify signing counts match build count
@@ -1517,6 +1605,7 @@ gh run watch
 **File:** `.github/workflows/ci.yml`
 
 **Steps:**
+
 1. Differentiate between test failures and coverage threshold failures
 2. Make threshold failures non-blocking but visible
 3. Fail on actual test errors
@@ -1525,6 +1614,7 @@ gh run watch
 See M-2 detailed fix above.
 
 **Testing:**
+
 ```bash
 # Test 1: Temporarily lower coverage to trigger threshold
 # Test 2: Introduce failing test
@@ -1537,22 +1627,22 @@ See M-2 detailed fix above.
 
 All actions are pinned to commit SHA (✅ security best practice):
 
-| Action | Current Version | Latest Stable | Notes |
-|--------|----------------|---------------|-------|
-| actions/checkout | 08c6903cd8... (v5.0.0) | v5.0.0 | ✅ Current |
-| actions-rust-lang/setup-rust-toolchain | 02be93da58... (v1.15.1) | v1.15.1 | ✅ Current |
-| Swatinem/rust-cache | f13886b937... (v2.8.1) | v2.8.1 | ✅ Current |
-| actions/upload-artifact | ea165f8d65... (v4.6.2) | v4.6.2 | ✅ Current |
-| actions/download-artifact | 634f93cb29... (v5.0.0) | v5.0.0 | ✅ Current |
-| actions/cache | 0057852bfa... (v4.3.0) | v4.3.0 | ✅ Current |
-| actions/github-script | ed597411d8... (v8) | v8.0.0 | ✅ Current |
-| cargo-bins/cargo-binstall | 38e8f5e4c3... (v1.15.6) | v1.15.6 | ✅ Current |
-| codecov/codecov-action | 5a10915... (v5.5.1) | v5.5.1 | ✅ Current |
-| sigstore/cosign-installer | d7543c93d8... (v3.10.0) | v3.10.0 | ✅ Current |
-| actions/attest-build-provenance | 977bb373ed... (v3.0.0) | v3.0.0 | ✅ Current |
-| taiki-e/install-action | 5ab30948b9... (v2.62.12) | v2.62.12 | ✅ Current |
-| softprops/action-gh-release | 6cbd405e2c... (v2.3.3) | v2.3.3 | ✅ Current |
-| MarcoIeni/release-plz-action | acb9246af4... (v0.5.117) | v0.5.117 | ✅ Current |
+| Action                                 | Current Version          | Latest Stable | Notes     |
+|----------------------------------------|--------------------------|---------------|-----------|
+| actions/checkout                       | 08c6903cd8... (v5.0.0)   | v5.0.0        | ✅ Current |
+| actions-rust-lang/setup-rust-toolchain | 02be93da58... (v1.15.1)  | v1.15.1       | ✅ Current |
+| Swatinem/rust-cache                    | f13886b937... (v2.8.1)   | v2.8.1        | ✅ Current |
+| actions/upload-artifact                | ea165f8d65... (v4.6.2)   | v4.6.2        | ✅ Current |
+| actions/download-artifact              | 634f93cb29... (v5.0.0)   | v5.0.0        | ✅ Current |
+| actions/cache                          | 0057852bfa... (v4.3.0)   | v4.3.0        | ✅ Current |
+| actions/github-script                  | ed597411d8... (v8)       | v8.0.0        | ✅ Current |
+| cargo-bins/cargo-binstall              | 38e8f5e4c3... (v1.15.6)  | v1.15.6       | ✅ Current |
+| codecov/codecov-action                 | 5a10915... (v5.5.1)      | v5.5.1        | ✅ Current |
+| sigstore/cosign-installer              | d7543c93d8... (v3.10.0)  | v3.10.0       | ✅ Current |
+| actions/attest-build-provenance        | 977bb373ed... (v3.0.0)   | v3.0.0        | ✅ Current |
+| taiki-e/install-action                 | 5ab30948b9... (v2.62.12) | v2.62.12      | ✅ Current |
+| softprops/action-gh-release            | 6cbd405e2c... (v2.3.3)   | v2.3.3        | ✅ Current |
+| MarcoIeni/release-plz-action           | acb9246af4... (v0.5.117) | v0.5.117      | ✅ Current |
 
 **Recommendation:** All actions are up-to-date. Set up Dependabot to automate updates:
 
@@ -1573,19 +1663,22 @@ updates:
 
 ## Summary of Findings
 
-| Category | Count | Details |
-|----------|-------|---------|
-| **Critical** | 0 | No critical issues found |
-| **High** | 3 | Security job exclusion, glob pattern failure, first commit edge case |
-| **Medium** | 8 | Timeouts, error handling, maintainability |
-| **Low** | 6 | Minor optimizations, consistency improvements |
-| **Total** | 17 | All documented with fixes |
+| Category     | Count | Details                                                              |
+|--------------|-------|----------------------------------------------------------------------|
+| **Critical** | 0     | No critical issues found                                             |
+| **High**     | 3     | Security job exclusion, glob pattern failure, first commit edge case |
+| **Medium**   | 8     | Timeouts, error handling, maintainability                            |
+| **Low**      | 6     | Minor optimizations, consistency improvements                        |
+| **Total**    | 17    | All documented with fixes                                            |
 
 **Overall Assessment:** 🟢 **EXCELLENT**
 
-The ruloc workflows demonstrate strong security practices and thoughtful design. The identified issues are primarily edge cases and best practice refinements rather than fundamental flaws. The recent security review successfully addressed all major concerns.
+The ruloc workflows demonstrate strong security practices and thoughtful design. The identified issues are primarily
+edge cases and best practice refinements rather than fundamental flaws. The recent security review successfully
+addressed all major concerns.
 
 **Next Steps:**
+
 1. Implement High priority fixes (H-1 through H-3)
 2. Add timeout-minutes to all jobs (M-1)
 3. Consider implementing Medium priority improvements based on project needs
@@ -1596,4 +1689,5 @@ The ruloc workflows demonstrate strong security practices and thoughtful design.
 
 **Report Generated:** 2025-10-06
 **Reviewer:** GitHub Actions Specialist
-**Contact:** For questions about this analysis, refer to the GitHub Actions documentation or create an issue in the repository.
+**Contact:** For questions about this analysis, refer to the GitHub Actions documentation or create an issue in the
+repository.

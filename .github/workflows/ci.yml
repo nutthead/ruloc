@@ -354,13 +354,22 @@ jobs:
     steps:
       - name: Check status
         run: |
-          # Check all job results
+          # Check critical jobs (must pass)
           if [[ "${{ needs.quick-check.result }}" != "success" ]] ||
              [[ "${{ needs.unit-tests.result }}" != "success" ]] ||
              [[ "${{ needs.coverage.result }}" != "success" ]]; then
             echo "❌ CI failed"
             exit 1
           fi
+
+          # Check security job (allow success or skipped, but warn on failure)
+          if [[ "${{ needs.security.result }}" == "failure" ]]; then
+            echo "⚠️  Security audit failed - review required"
+            echo "This is informational but indicates potential issues"
+            # Uncomment to make security blocking:
+            # exit 1
+          fi
+
           echo "✅ All CI checks passed"
 
       - name: Set merge queue status
