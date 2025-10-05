@@ -26,9 +26,12 @@ pub struct LineStats {
     /// Number of blank lines (whitespace only).
     #[serde(rename = "blank-lines")]
     pub blank_lines: usize,
-    /// Number of comment lines.
+    /// Number of comment lines, excluding rustdocs.
     #[serde(rename = "comment-lines")]
     pub comment_lines: usize,
+    /// Number of rustdoc lines.
+    #[serde(rename = "rustdoc-lines")]
+    pub rustdoc_lines: usize,
     /// Number of actual code lines.
     #[serde(rename = "code-lines")]
     pub code_lines: usize,
@@ -44,6 +47,7 @@ impl LineStats {
         self.all_lines += other.all_lines;
         self.blank_lines += other.blank_lines;
         self.comment_lines += other.comment_lines;
+        self.rustdoc_lines += other.rustdoc_lines;
         self.code_lines += other.code_lines;
     }
 }
@@ -363,8 +367,10 @@ impl Args {
 enum LineType {
     /// Line contains only whitespace.
     Blank,
-    /// Line is part of a comment.
+    /// Line is part of a regular comment.
     Comment,
+    /// Line is part of a rustdoc comment.
+    Rustdoc,
     /// Line contains code.
     Code,
 }
@@ -543,20 +549,33 @@ fn analyze_lines(content: &str) -> Vec<LineType> {
         // Classify based on token kind
         match token.kind() {
             SyntaxKind::COMMENT => {
-                // Mark all lines covered by this comment token as Comment
+                // Check if this is a rustdoc comment
+                let text = token.text();
+                let is_rustdoc = text.starts_with("///")
+                    || text.starts_with("//!")
+                    || text.starts_with("/**")
+                    || text.starts_with("/*!");
+
+                let line_type = if is_rustdoc {
+                    LineType::Rustdoc
+                } else {
+                    LineType::Comment
+                };
+
+                // Mark all lines covered by this comment token
                 line_types[start_line..=end_line.min(total_lines - 1)]
                     .iter_mut()
-                    .for_each(|t| *t = LineType::Comment);
+                    .for_each(|t| *t = line_type);
             }
             SyntaxKind::WHITESPACE => {
                 // Whitespace doesn't change classification
             }
             _ => {
                 // Any other token (keywords, identifiers, literals, etc.) is Code
-                // But only override if the line isn't already marked as Comment
+                // But only override if the line isn't already marked as Comment or Rustdoc
                 line_types[start_line..=end_line.min(total_lines - 1)]
                     .iter_mut()
-                    .filter(|t| **t != LineType::Comment)
+                    .filter(|t| **t != LineType::Comment && **t != LineType::Rustdoc)
                     .for_each(|t| *t = LineType::Code);
             }
         }
@@ -581,12 +600,17 @@ fn compute_line_stats(line_types: &[LineType], total_lines: usize) -> LineStats 
         .iter()
         .filter(|&&t| t == LineType::Comment)
         .count();
+    let rustdoc_lines = line_types
+        .iter()
+        .filter(|&&t| t == LineType::Rustdoc)
+        .count();
     let code_lines = line_types.iter().filter(|&&t| t == LineType::Code).count();
 
     LineStats {
         all_lines: total_lines,
         blank_lines,
         comment_lines,
+        rustdoc_lines,
         code_lines,
     }
 }
@@ -931,6 +955,7 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
         "{}All lines: {}\n\
          {}Blank lines: {}\n\
          {}Comment lines: {}\n\
+         {}Rustdoc lines: {}\n\
          {}Code lines: {}",
         prefix,
         stats.all_lines,
@@ -938,6 +963,8 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
         stats.blank_lines,
         prefix,
         stats.comment_lines,
+        prefix,
+        stats.rustdoc_lines,
         prefix,
         stats.code_lines
     )
@@ -1091,18 +1118,21 @@ mod tests {
     ///
     /// * `all_lines` - Total number of lines
     /// * `blank_lines` - Number of blank lines
-    /// * `comment_lines` - Number of comment lines
+    /// * `comment_lines` - Number of comment lines (excluding rustdocs)
+    /// * `rustdoc_lines` - Number of rustdoc lines
     /// * `code_lines` - Number of code lines
     fn make_line_stats(
         all_lines: usize,
         blank_lines: usize,
         comment_lines: usize,
+        rustdoc_lines: usize,
         code_lines: usize,
     ) -> LineStats {
         LineStats {
             all_lines,
             blank_lines,
             comment_lines,
+            rustdoc_lines,
             code_lines,
         }
     }
@@ -1116,16 +1146,24 @@ mod tests {
     /// * `path` - File path
     /// * `all_lines` - Total number of lines
     /// * `blank_lines` - Number of blank lines
-    /// * `comment_lines` - Number of comment lines
+    /// * `comment_lines` - Number of comment lines (excluding rustdocs)
+    /// * `rustdoc_lines` - Number of rustdoc lines
     /// * `code_lines` - Number of code lines
     fn make_simple_file_stats(
         path: &str,
         all_lines: usize,
         blank_lines: usize,
         comment_lines: usize,
+        rustdoc_lines: usize,
         code_lines: usize,
     ) -> FileStats {
-        let stats = make_line_stats(all_lines, blank_lines, comment_lines, code_lines);
+        let stats = make_line_stats(
+            all_lines,
+            blank_lines,
+            comment_lines,
+            rustdoc_lines,
+            code_lines,
+        );
         FileStats {
             path: path.to_string(),
             total: stats.clone(),
@@ -1163,8 +1201,8 @@ mod tests {
     fn make_standard_test_file_stats() -> FileStats {
         make_file_stats_with_tests(
             "test.rs",
-            make_line_stats(7, 1, 2, 4),
-            make_line_stats(3, 1, 1, 1),
+            make_line_stats(7, 1, 2, 0, 4),
+            make_line_stats(3, 1, 1, 0, 1),
         )
     }
 
@@ -1172,7 +1210,7 @@ mod tests {
     ///
     /// Contains 5 lines of production code only.
     fn make_minimal_test_file_stats() -> FileStats {
-        make_simple_file_stats("test.rs", 5, 1, 1, 3)
+        make_simple_file_stats("test.rs", 5, 1, 1, 0, 3)
     }
 
     /// Creates a detailed test `FileStats` for complex testing scenarios.
@@ -1181,8 +1219,8 @@ mod tests {
     fn make_detailed_test_file_stats() -> FileStats {
         make_file_stats_with_tests(
             "test.rs",
-            make_line_stats(10, 2, 3, 5),
-            make_line_stats(5, 1, 1, 3),
+            make_line_stats(10, 2, 3, 0, 5),
+            make_line_stats(5, 1, 1, 0, 3),
         )
     }
 
@@ -1193,9 +1231,9 @@ mod tests {
         Report {
             summary: Summary {
                 files: 1,
-                total: make_line_stats(10, 2, 3, 5),
-                production: make_line_stats(7, 1, 2, 4),
-                test: make_line_stats(3, 1, 1, 1),
+                total: make_line_stats(10, 2, 3, 0, 5),
+                production: make_line_stats(7, 1, 2, 0, 4),
+                test: make_line_stats(3, 1, 1, 0, 1),
             },
             files: vec![],
         }
@@ -1210,18 +1248,20 @@ mod tests {
         assert_eq!(stats.all_lines, 0);
         assert_eq!(stats.blank_lines, 0);
         assert_eq!(stats.comment_lines, 0);
+        assert_eq!(stats.rustdoc_lines, 0);
         assert_eq!(stats.code_lines, 0);
     }
 
     /// Tests that `LineStats::add()` correctly accumulates statistics.
     #[test]
     fn test_line_stats_add() {
-        let mut stats1 = make_line_stats(10, 2, 3, 5);
-        let stats2 = make_line_stats(20, 4, 6, 10);
+        let mut stats1 = make_line_stats(10, 2, 3, 0, 5);
+        let stats2 = make_line_stats(20, 4, 6, 0, 10);
         stats1.add(&stats2);
         assert_eq!(stats1.all_lines, 30);
         assert_eq!(stats1.blank_lines, 6);
         assert_eq!(stats1.comment_lines, 9);
+        assert_eq!(stats1.rustdoc_lines, 0);
         assert_eq!(stats1.code_lines, 15);
     }
 
@@ -1240,7 +1280,9 @@ mod tests {
         let content = "// comment 1\n// comment 2\n/// doc comment";
         let line_types = analyze_lines(content);
         assert_eq!(line_types.len(), 3);
-        assert!(line_types.iter().all(|&t| t == LineType::Comment));
+        assert_eq!(line_types[0], LineType::Comment);
+        assert_eq!(line_types[1], LineType::Comment);
+        assert_eq!(line_types[2], LineType::Rustdoc);
     }
 
     /// Tests that multiline block comments (`/* ... */`) are correctly identified.
@@ -1349,7 +1391,7 @@ mod tests {
     /// Tests that line statistics are correctly formatted for text output.
     #[test]
     fn test_format_line_stats() {
-        let stats = make_line_stats(100, 20, 30, 50);
+        let stats = make_line_stats(100, 20, 30, 0, 50);
         let formatted = format_line_stats(&stats, 2);
         assert!(formatted.contains("All lines: 100"));
         assert!(formatted.contains("Blank lines: 20"));
@@ -1915,10 +1957,10 @@ mod tests {
 
         let stats1 = make_file_stats_with_tests(
             "test1.rs",
-            make_line_stats(7, 1, 2, 4),
-            make_line_stats(3, 1, 1, 1),
+            make_line_stats(7, 1, 2, 0, 4),
+            make_line_stats(3, 1, 1, 0, 1),
         );
-        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 3);
+        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 0, 3);
 
         acc.add_file(&stats1).unwrap();
         acc.add_file(&stats2).unwrap();
@@ -1942,10 +1984,10 @@ mod tests {
 
         let stats1 = make_file_stats_with_tests(
             "test1.rs",
-            make_line_stats(7, 1, 2, 4),
-            make_line_stats(3, 1, 1, 1),
+            make_line_stats(7, 1, 2, 0, 4),
+            make_line_stats(3, 1, 1, 0, 1),
         );
-        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 3);
+        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 0, 3);
 
         acc.add_file(&stats1).unwrap();
         acc.add_file(&stats2).unwrap();
@@ -1970,7 +2012,7 @@ mod tests {
 
         // Add 1000 files to test buffering
         for i in 0..1000 {
-            let stats = make_simple_file_stats(&format!("test{}.rs", i), 10, 2, 3, 5);
+            let stats = make_simple_file_stats(&format!("test{}.rs", i), 10, 2, 3, 0, 5);
             acc.add_file(&stats).unwrap();
         }
 
@@ -2130,14 +2172,15 @@ mod tests {
     /// Tests that line stats accurately track all components.
     #[test]
     fn test_line_stats_comprehensive() {
-        let mut stats = make_line_stats(100, 20, 30, 50);
-        let other = make_line_stats(50, 10, 15, 25);
+        let mut stats = make_line_stats(100, 20, 30, 0, 50);
+        let other = make_line_stats(50, 10, 15, 0, 25);
 
         stats.add(&other);
 
         assert_eq!(stats.all_lines, 150);
         assert_eq!(stats.blank_lines, 30);
         assert_eq!(stats.comment_lines, 45);
+        assert_eq!(stats.rustdoc_lines, 0);
         assert_eq!(stats.code_lines, 75);
     }
 
@@ -2387,7 +2430,7 @@ mod tests {
     /// Tests LineStats serialization.
     #[test]
     fn test_line_stats_serialization() {
-        let stats = make_line_stats(100, 20, 30, 50);
+        let stats = make_line_stats(100, 20, 30, 0, 50);
         let json = serde_json::to_string(&stats).unwrap();
         let deserialized: LineStats = serde_json::from_str(&json).unwrap();
 
@@ -2409,9 +2452,9 @@ mod tests {
     fn test_summary_serialization() {
         let summary = Summary {
             files: 5,
-            total: make_line_stats(100, 20, 30, 50),
-            production: make_line_stats(70, 10, 20, 40),
-            test: make_line_stats(30, 10, 10, 10),
+            total: make_line_stats(100, 20, 30, 0, 50),
+            production: make_line_stats(70, 10, 20, 0, 40),
+            test: make_line_stats(30, 10, 10, 0, 10),
         };
 
         let json = serde_json::to_string(&summary).unwrap();
