@@ -40,6 +40,30 @@ const TEXT_OUTPUT_BASE_INDENT: usize = 4;
 /// Number of spaces for nested indentation level in text output formatting.
 const TEXT_OUTPUT_NESTED_INDENT: usize = 6;
 
+/// Debug mode marker for production blank lines (Production BLank).
+const DEBUG_MARKER_PRODUCTION_BLANK: &str = "PBL";
+
+/// Debug mode marker for production code lines (Production COde).
+const DEBUG_MARKER_PRODUCTION_CODE: &str = "PCO";
+
+/// Debug mode marker for production comment lines (Production CoMment).
+const DEBUG_MARKER_PRODUCTION_COMMENT: &str = "PCM";
+
+/// Debug mode marker for production rustdoc lines (Production DoC).
+const DEBUG_MARKER_PRODUCTION_RUSTDOC: &str = "PDC";
+
+/// Debug mode marker for test blank lines (Test BLank).
+const DEBUG_MARKER_TEST_BLANK: &str = "TBL";
+
+/// Debug mode marker for test code lines (Test COde).
+const DEBUG_MARKER_TEST_CODE: &str = "TCO";
+
+/// Debug mode marker for test comment lines (Test CoMment).
+const DEBUG_MARKER_TEST_COMMENT: &str = "TCM";
+
+/// Debug mode marker for test rustdoc lines (Test DoC).
+const DEBUG_MARKER_TEST_RUSTDOC: &str = "TDC";
+
 /// Comprehensive line-level statistics for a defined scope of Rust source code.
 ///
 /// Provides a complete breakdown of source code composition, categorizing every line
@@ -955,8 +979,16 @@ fn is_test_node(node: &SyntaxNode) -> bool {
         for attr in func.attrs() {
             if let Some(path) = attr.path() {
                 let attr_text = path.to_string();
-                if attr_text == "test" || attr_text == "cfg" {
+                if attr_text == "test" {
                     return true;
+                }
+                if attr_text == "cfg"
+                    && let Some(token_tree) = attr.token_tree()
+                {
+                    let tree_text = token_tree.syntax().text().to_string();
+                    if tree_text.contains("test") {
+                        return true;
+                    }
                 }
             }
         }
@@ -967,8 +999,13 @@ fn is_test_node(node: &SyntaxNode) -> bool {
         for attr in module.attrs() {
             if let Some(path) = attr.path() {
                 let attr_text = path.to_string();
-                if attr_text == "cfg" {
-                    return true;
+                if attr_text == "cfg"
+                    && let Some(token_tree) = attr.token_tree()
+                {
+                    let tree_text = token_tree.syntax().text().to_string();
+                    if tree_text.contains("test") {
+                        return true;
+                    }
                 }
             }
         }
@@ -1313,14 +1350,35 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
 /// A formatted string with prefix and line content
 fn format_debug_line(line: &str, line_type: LineType, is_test: bool, use_color: bool) -> String {
     let (prefix, colored_prefix) = match (is_test, line_type) {
-        (false, LineType::Blank) => ("PB", "PB".bright_black()),
-        (false, LineType::Comment) => ("PM", "PM".green()),
-        (false, LineType::Rustdoc) => ("PR", "PR".bright_green()),
-        (false, LineType::Code) => ("PC", "PC".blue()),
-        (true, LineType::Blank) => ("TB", "TB".bright_black()),
-        (true, LineType::Comment) => ("TM", "TM".yellow()),
-        (true, LineType::Rustdoc) => ("TR", "TR".bright_yellow()),
-        (true, LineType::Code) => ("TC", "TC".magenta()),
+        (false, LineType::Blank) => (
+            DEBUG_MARKER_PRODUCTION_BLANK,
+            DEBUG_MARKER_PRODUCTION_BLANK.bright_black(),
+        ),
+        (false, LineType::Comment) => (
+            DEBUG_MARKER_PRODUCTION_COMMENT,
+            DEBUG_MARKER_PRODUCTION_COMMENT.green(),
+        ),
+        (false, LineType::Rustdoc) => (
+            DEBUG_MARKER_PRODUCTION_RUSTDOC,
+            DEBUG_MARKER_PRODUCTION_RUSTDOC.bright_green(),
+        ),
+        (false, LineType::Code) => (
+            DEBUG_MARKER_PRODUCTION_CODE,
+            DEBUG_MARKER_PRODUCTION_CODE.blue(),
+        ),
+        (true, LineType::Blank) => (
+            DEBUG_MARKER_TEST_BLANK,
+            DEBUG_MARKER_TEST_BLANK.bright_black(),
+        ),
+        (true, LineType::Comment) => (
+            DEBUG_MARKER_TEST_COMMENT,
+            DEBUG_MARKER_TEST_COMMENT.yellow(),
+        ),
+        (true, LineType::Rustdoc) => (
+            DEBUG_MARKER_TEST_RUSTDOC,
+            DEBUG_MARKER_TEST_RUSTDOC.bright_yellow(),
+        ),
+        (true, LineType::Code) => (DEBUG_MARKER_TEST_CODE, DEBUG_MARKER_TEST_CODE.magenta()),
     };
 
     if use_color {
@@ -3180,16 +3238,40 @@ code();"#;
     fn test_format_debug_line() {
         // Test production code prefixes
         let line = "fn main() {}";
-        assert!(format_debug_line(line, LineType::Code, false, false).starts_with("PC  "));
-        assert!(format_debug_line(line, LineType::Comment, false, false).starts_with("PM  "));
-        assert!(format_debug_line(line, LineType::Rustdoc, false, false).starts_with("PR  "));
-        assert!(format_debug_line("", LineType::Blank, false, false).starts_with("PB  "));
+        assert!(
+            format_debug_line(line, LineType::Code, false, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_PRODUCTION_CODE))
+        );
+        assert!(
+            format_debug_line(line, LineType::Comment, false, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_PRODUCTION_COMMENT))
+        );
+        assert!(
+            format_debug_line(line, LineType::Rustdoc, false, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_PRODUCTION_RUSTDOC))
+        );
+        assert!(
+            format_debug_line("", LineType::Blank, false, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_PRODUCTION_BLANK))
+        );
 
         // Test test code prefixes
-        assert!(format_debug_line(line, LineType::Code, true, false).starts_with("TC  "));
-        assert!(format_debug_line(line, LineType::Comment, true, false).starts_with("TM  "));
-        assert!(format_debug_line(line, LineType::Rustdoc, true, false).starts_with("TR  "));
-        assert!(format_debug_line("", LineType::Blank, true, false).starts_with("TB  "));
+        assert!(
+            format_debug_line(line, LineType::Code, true, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_TEST_CODE))
+        );
+        assert!(
+            format_debug_line(line, LineType::Comment, true, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_TEST_COMMENT))
+        );
+        assert!(
+            format_debug_line(line, LineType::Rustdoc, true, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_TEST_RUSTDOC))
+        );
+        assert!(
+            format_debug_line("", LineType::Blank, true, false)
+                .starts_with(&format!("{}  ", DEBUG_MARKER_TEST_BLANK))
+        );
 
         // Verify line content is preserved
         assert!(format_debug_line(line, LineType::Code, false, false).contains(line));
@@ -3296,7 +3378,12 @@ fn test() {
     /// Tests compute_line_stats with rustdoc lines.
     #[test]
     fn test_compute_line_stats_with_rustdoc() {
-        let line_types = vec![LineType::Rustdoc, LineType::Rustdoc, LineType::Code, LineType::Blank];
+        let line_types = vec![
+            LineType::Rustdoc,
+            LineType::Rustdoc,
+            LineType::Code,
+            LineType::Blank,
+        ];
         let stats = compute_line_stats(&line_types, 4);
         assert_eq!(stats.all_lines, 4);
         assert_eq!(stats.rustdoc_lines, 2);
@@ -3415,12 +3502,12 @@ mod tests {
 
         // Test production rustdoc
         let prod = format_debug_line(line, LineType::Rustdoc, false, false);
-        assert!(prod.starts_with("PR  "));
+        assert!(prod.starts_with(&format!("{}  ", DEBUG_MARKER_PRODUCTION_RUSTDOC)));
         assert!(prod.contains(line));
 
         // Test test rustdoc
         let test = format_debug_line(line, LineType::Rustdoc, true, false);
-        assert!(test.starts_with("TR  "));
+        assert!(test.starts_with(&format!("{}  ", DEBUG_MARKER_TEST_RUSTDOC)));
         assert!(test.contains(line));
 
         // Test with colors
@@ -3471,10 +3558,7 @@ mod tests {
 
         // Add many files to test memory accumulation
         for i in 0..100 {
-            let stats = make_simple_file_stats(
-                &format!("file{}.rs", i),
-                10, 2, 2, 1, 5
-            );
+            let stats = make_simple_file_stats(&format!("file{}.rs", i), 10, 2, 2, 1, 5);
             acc.add_file(&stats).unwrap();
         }
 
