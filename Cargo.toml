@@ -5,8 +5,8 @@ authors = ["Behrang Saeedzadeh <hello@behrang.org>"]
 edition = "2024"
 rust-version = "1.90.0"
 readme = "README.md"
-homepage = "https://github.com/nutthead/samoyed"
-repository = "https://github.com/nutthead/samoyed"
+homepage = "https://github.com/nutthead/ruloc"
+repository = "https://github.com/nutthead/ruloc"
 license = "MIT"
 description = "A fast, single-purpose CLI tool to analyze Rust codebase metrics with test/production breakdowns"
 keywords = ["loc", "lines-of-code", "tokei"]
@@ -16,7 +16,6 @@ exclude = [
     ".gitignore",
     ".docs/",
     ".readme/",
-    ".cargo/",
     ".markdownlint.json",
     ".tarpaulin.toml",
     ".release-plz.toml",
@@ -43,4 +42,4 @@ env_logger = "0.11.8"
 rayon = "1.11.0"
 indicatif = "0.18.0"
 tempfile = "3.14.0"
-colored = "2.2.0"
+colored = "3.0.0"
