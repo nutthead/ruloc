@@ -34,6 +34,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Normalize version
         id: version
@@ -51,6 +52,15 @@ jobs:
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Publishing version: ${VERSION}"
+
+      - name: Install dependencies
+        run: |
+          # Ensure jq is installed (used for JSON parsing)
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "Installing jq..."
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          jq --version
 
       - name: Check if release exists
         run: |

@@ -30,6 +30,7 @@ jobs:
   release-tag:
     name: Create Release Tag
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Prevent infinite loops from github-actions bot or [skip ci]
     if: |
       github.event.pusher.name != 'github-actions[bot]' &&

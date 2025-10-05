@@ -56,6 +56,7 @@ jobs:
   quick-check:
     name: Quick Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -91,6 +92,7 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     continue-on-error: true  # Advisory warnings are informational only
     steps:
       - name: Checkout repository
@@ -133,6 +135,7 @@ jobs:
   unit-tests:
     name: Unit Tests ${{ matrix.name }}
     needs: [quick-check]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -192,6 +195,7 @@ jobs:
     name: Code Coverage
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       issues: write  # Needed for PR coverage comments via issues.createComment
@@ -222,14 +226,24 @@ jobs:
             cargo install --locked cargo-tarpaulin
           fi
 
-          # Run tarpaulin and capture exit code
-          # Use --no-fail-fast to ensure XML is generated even if coverage is low
-          cargo tarpaulin --timeout 120 --avoid-cfg-tarpaulin || {
-            EXIT_CODE=$?
-            echo "⚠️  Tarpaulin exited with code $EXIT_CODE (possibly due to coverage threshold)"
-            echo "Continuing to upload coverage data..."
-            exit 0  # Don't fail the step
-          }
+          # Run tarpaulin - differentiate between test failures and coverage threshold
+          set +e  # Don't exit script on error
+          cargo tarpaulin --timeout 120 --avoid-cfg-tarpaulin
+          EXIT_CODE=$?
+          set -e
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ Coverage passed (above threshold)"
+          elif [ $EXIT_CODE -eq 2 ]; then
+            echo "⚠️  Coverage below threshold - review required"
+            echo "Uploading report for analysis..."
+            # Make this blocking by uncommenting:
+            # exit 2
+          else
+            echo "❌ Tarpaulin failed (exit code: $EXIT_CODE)"
+            echo "This indicates test failures or compilation errors"
+            exit $EXIT_CODE  # Fail on real errors
+          fi
 
       - name: Upload coverage to Codecov
         if: always()
@@ -348,6 +362,7 @@ jobs:
     if: always()
     needs: [quick-check, security, unit-tests, coverage]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       checks: write  # Needed for merge queue status checks

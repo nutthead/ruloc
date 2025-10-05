@@ -1028,7 +1028,7 @@ version = "0.1.0"
 
 # Case 2: Indented/formatted differently
 [package]
-version = "0.1.0"  # ← Doesn't match due to leading space
+  version = "0.1.0"  # ← Doesn't match due to leading space
 
 # Case 3: Single quotes
 version = '0.1.0'  # ← cut -d'"' fails

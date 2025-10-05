@@ -46,6 +46,7 @@ jobs:
   prepare-release:
     name: Prepare Release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -91,6 +92,7 @@ jobs:
   security-scan:
     name: Security Audit & SBOM
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [prepare-release]
     steps:
       - name: Checkout repository
@@ -147,6 +149,7 @@ jobs:
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [prepare-release]
+    timeout-minutes: 90
     strategy:
       fail-fast: false  # Continue building other targets if one fails
       matrix:
@@ -284,6 +287,7 @@ jobs:
     name: Generate Attestations
     needs: [build-binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
       id-token: write  # Required for Sigstore keyless signing
@@ -360,6 +364,7 @@ jobs:
     name: Generate Changelog
     needs: [prepare-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
@@ -409,6 +414,7 @@ jobs:
     name: Publish GitHub Release
     needs: [prepare-release, build-binaries, attestation, security-scan, generate-changelog]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write  # Required to create releases
     steps:
@@ -505,8 +511,9 @@ jobs:
   publish-crate:
     name: Publish to crates.io
     needs: [publish-release]
-    if: github.event.inputs.skip_publish != 'true'
+    if: github.event.inputs.skip_publish != true
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -537,6 +544,7 @@ jobs:
     name: Verify Release
     needs: [prepare-release, publish-release]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Install cosign
         uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
@@ -560,7 +568,7 @@ jobs:
             test-artifact.tar.gz
 
       - name: Verify crate publication
-        if: github.event.inputs.skip_publish != 'true'
+        if: github.event.inputs.skip_publish != true
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           # Poll crates.io for the published version with exponential backoff (max 10 attempts, up to ~5 min)
