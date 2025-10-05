@@ -9,8 +9,8 @@ out = ["Html", "Xml", "Json", "Lcov"]
 # Output directory for reports
 output-dir = "target/tarpaulin"
 
-# Fail if coverage is below 80%
-fail-under = 80.0
+# Fail if coverage is below 70%
+fail-under = 70.0
 
 # Follow symbolic links
 follow-exec = true

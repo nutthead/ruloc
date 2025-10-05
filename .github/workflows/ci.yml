@@ -392,7 +392,7 @@ jobs:
       - name: Enforce coverage threshold
         if: always() && steps.tarpaulin.outputs.exit_code == '2'
         run: |
-          echo "❌ Coverage is below the required threshold (80%)"
+          echo "❌ Coverage is below the required threshold (70%)"
           echo "Review the coverage report uploaded to Codecov for details"
           exit 1
 

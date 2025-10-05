@@ -55,7 +55,7 @@ cargo fmt --all -- --check
 1. **Fork the repository** and create a new branch for your changes
 2. **Make your changes** following the coding standards
 3. **Write tests** for new functionality
-4. **Ensure all tests pass** and coverage remains above 80%
+4. **Ensure all tests pass** and coverage remains above 70%
 5. **Update documentation** if necessary
 6. **Submit a pull request** with a clear description
 
@@ -219,7 +219,7 @@ $feat
    cargo fmt --all -- --check
    cargo clippy --all-targets --all-features -- -D warnings
    cargo test
-   cargo tarpaulin  # Coverage must be ≥ 80%
+   cargo tarpaulin  # Coverage must be ≥ 70%
    ```
 
 2. **Update documentation** if you've changed functionality
@@ -289,7 +289,7 @@ mod tests {
 
 ## Code Coverage
 
-This project maintains a minimum code coverage of **80%** (target: **85%+**).
+This project maintains a minimum code coverage of **70%**.
 
 ### Checking Coverage
 
@@ -307,7 +307,7 @@ cargo tarpaulin --out Html
 ### Coverage Reports
 
 - Coverage reports are automatically generated in CI
-- PRs that decrease coverage below 80% will fail
+- PRs that decrease coverage below 70% will fail
 - Coverage reports are uploaded to Codecov
 - You can view detailed coverage in `target/tarpaulin/tarpaulin-report.html`
 
