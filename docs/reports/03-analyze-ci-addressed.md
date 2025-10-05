@@ -568,17 +568,232 @@ If coverage uploads are failing in CI, the issue would be unrelated to filename 
 
 ---
 
+## Major Finding #4: Global RUSTFLAGS=-D warnings
+
+### Expert's Report Analysis
+
+> **Global `RUSTFLAGS=-D warnings` can cause spurious failures**
+> - Location: `ci.yml:44-49`
+> - Issue: Setting `-D warnings` globally affects dependencies during `cargo test` builds, not just your crate(s).
+> - Impact: Third-party warnings can fail CI unexpectedly.
+> - Fix: Remove the global `RUSTFLAGS` and rely on `cargo clippy -- -D warnings` (`ci.yml:84-85`) and `RUSTDOCFLAGS` just for docs (`ci.yml:87-90`). If you want to gate compile-time warnings for the workspace only, use `RUSTFLAGS` with `--config warnings=...` per package or `workspace.lints` in `Cargo.toml`.
+
+### Verification Status: ⚠️ PARTIALLY VALID (Fixed for Best Practice)
+
+The expert's concern has theoretical merit but is mitigated by Cargo's built-in protections. However, removing the global RUSTFLAGS is still better practice.
+
+### Investigation Findings
+
+**Current Configuration:**
+
+```yaml
+# ci.yml:44-49
+env:
+  RUST_VERSION: "1.90.0"
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  RUST_BACKTRACE: short
+  RUSTFLAGS: "-D warnings"  # ← Global setting
+```
+
+**Cargo's Protection Mechanism:**
+
+Research reveals that while `RUSTFLAGS` technically applies to all crates, Cargo has built-in protection:
+
+1. **Automatic lint capping:** Cargo passes `--cap-lints=allow` for non-path dependencies
+2. **Impact:** External dependency warnings are suppressed and won't fail builds
+3. **Only affects:** Local crate(s) and path dependencies
+
+**Source:** Rust documentation and Stack Overflow discussions confirm that warnings from non-path upstream dependencies are suppressed due to `--cap-lints=allow` that Cargo automatically adds.
+
+### Analysis
+
+**Is this actually a problem?**
+
+No, not in practice:
+- ✅ External dependencies won't cause CI failures
+- ✅ Cargo's lint capping protects against the expert's concern
+- ✅ Only local code warnings will cause failures
+
+**Should we still remove it?**
+
+Yes, for best practices:
+- The global RUSTFLAGS is **redundant** because:
+  - Clippy already has explicit `-D warnings` (line 85)
+  - RUSTDOCFLAGS is set explicitly for docs (line 90)
+- **Explicit is better than implicit:** It's clearer to see where warnings are enforced
+- **Reduces confusion:** Developers won't wonder if dependency warnings are failing builds
+
+### Resolution
+
+**Status:** ✅ FIXED (for clarity and best practice)
+
+**Change Applied:**
+
+```diff
+# ci.yml:44-49
+env:
+  RUST_VERSION: "1.90.0"
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  RUST_BACKTRACE: short
+- RUSTFLAGS: "-D warnings"  # Treat warnings as errors
+```
+
+**Rationale:**
+- Removes redundancy (clippy already has explicit `-D warnings`)
+- Makes the workflow more explicit about where warnings are enforced
+- Follows the principle of explicit configuration over global defaults
+- No functional change since external dependencies were already protected
+
+**Warning enforcement remains via:**
+1. `cargo clippy --all-targets --all-features -- -D warnings` (line 85)
+2. `RUSTDOCFLAGS: "-D warnings"` for documentation (line 90)
+
+### Impact Assessment
+
+**Before:**
+- ⚠️ Global RUSTFLAGS present but largely redundant
+- ⚠️ Could cause confusion about whether dependencies are affected
+- ✅ Protected by Cargo's --cap-lints mechanism
+
+**After:**
+- ✅ Explicit warning enforcement via clippy and rustdocflags
+- ✅ Clearer configuration
+- ✅ No functional change to CI behavior
+
+---
+
+## Major Finding #5: Non-standard Cosign/Sigstore Environment Variable Naming
+
+### Expert's Report Analysis
+
+> **Cosign/Sigstore env naming**
+> - Location: `release.yml:34-44` and `attestation` job
+> - Issue: Using `FULCIO_URL`/`REKOR_URL` env keys is non-standard; cosign recognizes `COSIGN_FULCIO_URL`/`COSIGN_REKOR_URL`.
+> - Impact: URLs may be ignored if cosign arguments don't override them.
+> - Fix: Rename envs to `COSIGN_FULCIO_URL` and `COSIGN_REKOR_URL`, or pass flags explicitly.
+
+### Verification Status: ✅ VALID (Fixed by Removal)
+
+The expert is correct that these are non-standard variable names. However, they are now **unused** after our earlier fix.
+
+### Investigation Findings
+
+**Current State (Before Fix):**
+
+```yaml
+# release.yml:40-43
+env:
+  COSIGN_EXPERIMENTAL: 1
+  FULCIO_URL: https://fulcio.sigstore.dev  # ← Non-standard
+  REKOR_URL: https://rekor.sigstore.dev    # ← Non-standard
+```
+
+**Standard Cosign Environment Variables:**
+
+From Sigstore/cosign documentation and community resources:
+- ✅ `COSIGN_FULCIO_URL` - Standard name for Fulcio endpoint
+- ✅ `COSIGN_REKOR_URL` - Standard name for Rekor endpoint
+- ✅ `COSIGN_OIDC_ISSUER` - Standard name for OIDC issuer
+- ❌ `FULCIO_URL` / `REKOR_URL` - Custom/non-standard names
+
+**Usage Verification:**
+
+Checked entire `release.yml` for usage of these variables:
+```bash
+grep -n "FULCIO_URL\|REKOR_URL" .github/workflows/release.yml
+42:  FULCIO_URL: https://fulcio.sigstore.dev  # Certificate authority
+43:  REKOR_URL: https://rekor.sigstore.dev    # Transparency log
+```
+
+**Result:** These variables are **defined but never used**.
+
+### Why Are They Unused?
+
+These variables became obsolete after fixing Major Finding #1:
+
+**Before (Major Finding #1 fix):**
+```yaml
+cosign sign-blob \
+  --oidc-issuer="${FULCIO_URL}" \  # ← Incorrectly using FULCIO_URL
+  ...
+```
+
+**After (Major Finding #1 fix):**
+```yaml
+cosign sign-blob \
+  --oidc-issuer="https://token.actions.githubusercontent.com" \  # ← Explicit value
+  ...
+```
+
+The signing command now uses:
+- Explicit `--oidc-issuer` value (not an env var)
+- Cosign defaults for Fulcio and Rekor URLs (public instance)
+- No need for custom URL configuration
+
+### Resolution
+
+**Status:** ✅ FIXED (by removal)
+
+**Change Applied:**
+
+```diff
+# release.yml:40-43
+env:
+  COSIGN_EXPERIMENTAL: 1
+- FULCIO_URL: https://fulcio.sigstore.dev
+- REKOR_URL: https://rekor.sigstore.dev
+```
+
+**Rationale:**
+- Variables are not used anywhere in the workflow
+- Removing unused configuration reduces confusion
+- Cosign uses public instance defaults when not specified
+- Cleaner than renaming to standard names when they're unnecessary
+
+### Impact Assessment
+
+**Before:**
+- ⚠️ Non-standard env var names defined
+- ⚠️ Not actually used anywhere
+- ⚠️ Misleading presence suggests they're being used
+
+**After:**
+- ✅ Unused configuration removed
+- ✅ Workflow is cleaner and more maintainable
+- ✅ Cosign behavior unchanged (uses public defaults)
+- ✅ No functional impact
+
+### Alternative Approach Considered
+
+**Option 1:** Rename to standard names (`COSIGN_FULCIO_URL`, etc.)
+- ❌ Rejected: Still unnecessary since they're not used
+
+**Option 2:** Keep them for documentation
+- ❌ Rejected: Comments are better for documentation than unused env vars
+
+**Option 3:** Remove entirely (chosen)
+- ✅ Simplifies workflow
+- ✅ Removes confusion
+- ✅ Matches actual usage
+
+---
+
 ## Related Issues in CI Analysis
 
 The expert's full report (docs/reports/02-analyze-ci.md:411-417) identified multiple major findings:
 
 - **Major Finding #1:** ✅ FIXED - Incorrect cosign OIDC issuer (Addressed above)
 - **Major Finding #2:** ✅ FIXED - Signature verification identity mismatch (Addressed above)
-- **Major Finding #3:** ✅ VERIFIED INCORRECT - Coverage artifact filename mismatch risk (This section)
-- **Major Finding #4:** ⏸️ NOT ADDRESSED - Global `RUSTFLAGS=-D warnings` can cause spurious failures
-- **Major Finding #5:** ⏸️ NOT ADDRESSED - Non-standard Cosign/Sigstore environment variable naming
+- **Major Finding #3:** ❌ VERIFIED INCORRECT - Coverage artifact filename mismatch risk (Addressed above)
+- **Major Finding #4:** ✅ FIXED - Global `RUSTFLAGS=-D warnings` (Addressed above)
+- **Major Finding #5:** ✅ FIXED - Non-standard Cosign/Sigstore environment variable naming (Addressed above)
 
-**Status of findings:** Two critical signing/verification issues have been fixed. One finding was verified as incorrect. Two findings remain for potential future work.
+**Status of findings:** All five findings have been analyzed and addressed:
+- **2 Critical issues fixed:** OIDC issuer + certificate identity (prevented complete signing/verification failure)
+- **2 Cleanup issues fixed:** RUSTFLAGS redundancy + unused env vars (improved code clarity)
+- **1 Finding disproven:** Coverage filename (expert's claim was factually incorrect)
 
 ## References
 
@@ -613,32 +828,62 @@ The expert's full report (docs/reports/02-analyze-ci.md:411-417) identified mult
 - Tarpaulin help documentation: `cargo tarpaulin --help`
 - Confirmed: XML output is always named `cobertura.xml` (hardcoded, cannot be changed)
 
+**Finding #4 (RUSTFLAGS):**
+- Web search: "RUSTFLAGS warnings affects dependencies cargo build test"
+- Rust documentation on RUSTFLAGS and --cap-lints behavior
+- Stack Overflow discussions on RUSTFLAGS impact scope
+- Confirmed: Cargo uses `--cap-lints=allow` for non-path dependencies automatically
+
+**Finding #5 (Cosign Env Vars):**
+- Web search: "cosign environment variables COSIGN_FULCIO_URL COSIGN_REKOR_URL official"
+- Sigstore documentation on custom component configuration
+- Red Hat documentation on cosign environment variables
+- Grep verification: Confirmed variables are unused in workflow
+- Confirmed: Standard names are `COSIGN_FULCIO_URL` and `COSIGN_REKOR_URL`
+
 
 ## Conclusion
 
-Three of the expert's findings have been analyzed and addressed. The results are mixed:
+All five of the expert's findings have been thoroughly analyzed and addressed. The results show a mix of critical issues, cleanup opportunities, and one incorrect claim:
 
 **Finding #1 (OIDC Issuer):** ✅ **Accurate and Fixed**
 **Finding #2 (Certificate Identity):** ✅ **Accurate and Fixed**
 **Finding #3 (Coverage Filename):** ❌ **Incorrect - No Issue Exists**
+**Finding #4 (RUSTFLAGS):** ⚠️ **Partially Valid - Fixed for Best Practice**
+**Finding #5 (Cosign Env Vars):** ✅ **Accurate - Fixed by Removal**
 
 ### Summary of Actions
 
 **Issue #1: OIDC Issuer Misconfiguration**
 - **Status:** Fixed
+- **Severity:** Critical
 - **Change:** `--oidc-issuer="${FULCIO_URL}"` → `--oidc-issuer="https://token.actions.githubusercontent.com"`
 - **Impact:** Signing operations will now succeed and produce verifiable signatures
 
 **Issue #2: Certificate Identity Mismatch**
 - **Status:** Fixed
+- **Severity:** Critical
 - **Change:** `@refs/heads/master` → `@.*` in verification identity pattern (2 locations)
 - **Impact:** Verification will now succeed for tag-triggered and manual releases
 
 **Issue #3: Coverage Artifact Filename Mismatch**
 - **Status:** Verified as incorrect
+- **Severity:** None (issue doesn't exist)
 - **Finding:** No filename mismatch exists. Tarpaulin outputs `cobertura.xml`, which matches CI expectations exactly
 - **Root cause:** Expert confused HTML output filename (`tarpaulin-report.html`) with XML output
 - **Impact:** No action required; configuration is already correct
+
+**Issue #4: Global RUSTFLAGS=-D warnings**
+- **Status:** Fixed
+- **Severity:** Low (theoretical risk, mitigated by Cargo)
+- **Change:** Removed global `RUSTFLAGS: "-D warnings"` from ci.yml
+- **Impact:** Cleaner configuration; warnings still enforced via explicit clippy and rustdocflags
+
+**Issue #5: Non-standard Cosign Environment Variables**
+- **Status:** Fixed
+- **Severity:** Low (unused variables)
+- **Change:** Removed unused `FULCIO_URL` and `REKOR_URL` from release.yml
+- **Impact:** Cleaner workflow; no functional change (variables were unused)
 
 ### Critical Impact
 
@@ -654,25 +899,41 @@ With these fixes:
 - ✅ Users can verify artifacts
 - ✅ Supply chain security is functional
 
-**Finding #3** highlighted the importance of verifying assumptions with actual tool behavior before implementing fixes.
+**Findings #3, #4, and #5** highlighted different aspects of code review:
+- Finding #3: Importance of verifying expert assumptions with actual tool behavior
+- Finding #4: Value of explicit configuration over implicit global settings
+- Finding #5: Benefit of removing unused configuration to reduce confusion
 
 ### Process Improvements
 
-This analysis demonstrated:
-1. **Value of independent verification:** Not all expert findings are correct
-2. **Importance of testing:** Local verification revealed the actual tarpaulin output
-3. **Tool-specific knowledge matters:** Generic assumptions about tool behavior can be misleading
+This comprehensive analysis demonstrated:
+
+1. **Independent verification is essential:** Not all expert findings are correct (Finding #3)
+2. **Nuance matters:** Some issues have theoretical merit but practical mitigations (Finding #4)
+3. **Context is key:** Unused configuration should be removed, not just renamed (Finding #5)
+4. **Severity varies:** Critical issues (Findings #1, #2) vs. cleanup opportunities (Findings #4, #5)
+5. **Testing validates claims:** Local verification revealed actual tool behavior
+
+### Files Modified
+
+1. **`.github/workflows/ci.yml`**: Removed global `RUSTFLAGS: "-D warnings"`
+2. **`.github/workflows/release.yml`**: Removed unused `FULCIO_URL` and `REKOR_URL`
+3. **`docs/reports/03-analyze-ci-addressed.md`**: Comprehensive documentation of all findings
 
 **Next Steps:**
-1. ✅ Commit the fixes for findings #1 and #2
-2. ✅ Document the verification of finding #3
-3. Monitor the next production release to confirm signatures are created and verifiable
-4. Consider addressing the remaining findings (#4, #5) from the expert's report if they prove accurate upon investigation
+1. ✅ All five findings analyzed and addressed
+2. ✅ Critical issues fixed (signing and verification now functional)
+3. ✅ Code cleanup completed (RUSTFLAGS and env vars)
+4. Monitor the next production release to confirm signatures are created and verifiable
+5. Consider this analysis complete - no remaining expert findings to address
 
 ---
 
 **Report prepared by:** Claude Code
 **Session date:** 2025-10-05
-**Files modified:** `.github/workflows/release.yml` (3 lines changed across 2 locations)
-**Findings analyzed:** 3 (2 fixed, 1 verified incorrect)
-**Commits:** Pending (documentation update)
+**Workflows modified:**
+- `.github/workflows/ci.yml` (removed global RUSTFLAGS)
+- `.github/workflows/release.yml` (fixed OIDC issuer, certificate identity, removed unused env vars)
+**Findings analyzed:** 5 (4 fixed, 1 verified incorrect)
+**Lines changed:** ~8 across 2 workflow files
+**Commits:** Pending
