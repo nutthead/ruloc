@@ -4,7 +4,7 @@
 
 > A minimalist, AST-driven Rust lines of code counter with intelligent production/test separation.
 
-ruloc prov****ides precise source code metrics for Rust projects by leveraging AST-based parsing to accurately distinguish between production and test code. It counts blank lines, comments, rustdoc documentation, and executable code—all while maintaining a simple, single-file architecture that's easy to understand and extend.
+ruloc provides precise source code metrics for Rust projects by leveraging AST-based parsing to accurately distinguish between production and test code. It counts blank lines, comments, rustdoc documentation, and executable code—all while maintaining a simple, single-file architecture that's easy to understand and extend.
 
 ![ruloc](./.readme/ruloc.webp)
 
