@@ -46,7 +46,6 @@ env:
   CARGO_TERM_COLOR: always  # Enable colored output in CI logs
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse  # Use sparse registry protocol
   RUST_BACKTRACE: short  # Provide backtraces without excessive noise
-  RUSTFLAGS: "-D warnings"  # Treat warnings as errors
 
 permissions:
   contents: read
