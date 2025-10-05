@@ -1,0 +1,214 @@
+# ============================================================================
+# Manual Crate Publishing
+# ============================================================================
+# Manually publish an existing GitHub release to crates.io
+# Useful when:
+# - Initial publication failed
+# - Publication was skipped during release
+# - Need to retry publication for a specific version
+
+name: Publish Crate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.1.0 or v0.1.0)'
+        required: true
+        type: string
+      skip_verification:
+        description: 'Skip post-publication verification'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.90.0"
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Normalize version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          # Remove 'v' prefix if present
+          VERSION="${VERSION#v}"
+
+          # Validate version format
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z or X.Y.Z-prerelease"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing version: ${VERSION}"
+
+      - name: Check if release exists
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Check if the GitHub release exists
+          if ! gh release view "v${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "❌ Release v${VERSION} does not exist"
+            echo "Available releases:"
+            gh release list --repo "${{ github.repository }}" --limit 10
+            exit 1
+          fi
+
+          echo "✅ Release v${VERSION} found"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if already published
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Check if version already exists on crates.io
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/ruloc/${VERSION}")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "⚠️  Version ${VERSION} is already published on crates.io"
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+
+            # Get published metadata
+            PUBLISHED_DATA=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}")
+            CREATED_AT=$(echo "$PUBLISHED_DATA" | jq -r '.version.created_at')
+            echo "Published at: ${CREATED_AT}"
+            echo ""
+            echo "To yank this version and republish, run:"
+            echo "  cargo yank --vers ${VERSION} ruloc"
+            echo ""
+            echo "Note: Yanked versions cannot be un-yanked, and the same version"
+            echo "number cannot be reused even after yanking."
+            exit 1
+          else
+            echo "✅ Version ${VERSION} not found on crates.io - ready to publish"
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository at tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: v${{ steps.version.outputs.version }}
+          fetch-depth: 0
+
+      - name: Verify Cargo.toml version matches
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ Version mismatch!"
+            echo "  Requested: ${VERSION}"
+            echo "  Cargo.toml: ${CARGO_VERSION}"
+            echo ""
+            echo "The tag version doesn't match Cargo.toml."
+            echo "This may indicate the tag was created incorrectly."
+            exit 1
+          fi
+
+          echo "✅ Version matches: ${VERSION}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@02be93da58aa71fb456aa9c43b301149248829d8 # v1.15.1
+        with:
+          toolchain: 1.90.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-on-failure: false
+          save-if: false
+
+      - name: Verify package can be built
+        run: |
+          echo "Building package to verify it compiles..."
+          cargo build --locked --release
+          echo "✅ Package builds successfully"
+
+      - name: Package and inspect
+        run: |
+          echo "Packaging crate..."
+          cargo package --locked --allow-dirty
+
+          echo ""
+          echo "Package contents:"
+          cargo package --locked --list
+
+          echo ""
+          echo "Package metadata:"
+          cargo metadata --format-version 1 --no-deps | jq -r '.packages[0] | {name, version, description, license, repository}'
+
+      - name: Publish to crates.io
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Publishing ruloc v${VERSION} to crates.io..."
+
+          cargo publish --locked
+
+          echo "✅ Published successfully!"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Verify publication
+        if: github.event.inputs.skip_verification != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "Waiting for crates.io to index the new version..."
+          echo "This may take a few minutes..."
+
+          # Poll crates.io with exponential backoff (max 10 attempts, ~5 min total)
+          for i in {1..10}; do
+            sleep $((i * 10))
+
+            PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num // empty')
+
+            if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
+              echo "✅ Version ${VERSION} is now available on crates.io!"
+              echo "   https://crates.io/crates/ruloc/${VERSION}"
+
+              # Show some metadata
+              curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | \
+                jq -r '.version | "   Downloads: \(.downloads)\n   Created: \(.created_at)"'
+
+              exit 0
+            else
+              echo "Attempt $i/10: Not indexed yet, waiting $((i * 10)) seconds..."
+            fi
+          done
+
+          echo "⚠️  Version published but not yet indexed after 10 attempts"
+          echo "This is likely a temporary delay. Check manually:"
+          echo "https://crates.io/crates/ruloc/${VERSION}"
+          exit 1
+
+      - name: Post-publication summary
+        if: always()
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "## 📦 Publication Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "**Crate:** ruloc" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [crates.io](https://crates.io/crates/ruloc/${VERSION})" >> $GITHUB_STEP_SUMMARY
+          echo "- [docs.rs](https://docs.rs/ruloc/${VERSION})" >> $GITHUB_STEP_SUMMARY
+          echo "- [GitHub Release](https://github.com/${{ github.repository }}/releases/tag/v${VERSION})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Verify the crate page: https://crates.io/crates/ruloc/${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check documentation: https://docs.rs/ruloc/${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "3. Test installation: \`cargo install ruloc --version ${VERSION}\`" >> $GITHUB_STEP_SUMMARY
