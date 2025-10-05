@@ -11,12 +11,21 @@ use ra_ap_syntax::{AstNode, SourceFile, SyntaxKind, SyntaxNode, ast, ast::HasAtt
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
+
+/// Buffer size for FileBackedAccumulator writer (8MB).
+const FILE_ACCUMULATOR_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
+/// Number of spaces for base indentation level in text output formatting.
+const TEXT_OUTPUT_BASE_INDENT: usize = 4;
+
+/// Number of spaces for nested indentation level in text output formatting.
+const TEXT_OUTPUT_NESTED_INDENT: usize = 6;
 
 /// Statistics for lines of code in a given scope.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,14 +221,22 @@ impl FileBackedAccumulator {
     ///
     /// Returns an error if the temporary file cannot be created
     pub fn new() -> Result<Self, String> {
-        let temp_file =
-            NamedTempFile::new().map_err(|e| format!("Failed to create temporary file: {}", e))?;
+        let temp_file = NamedTempFile::new().map_err(|e| {
+            format!(
+                "Failed to create temporary file for accumulator: {}. Ensure adequate disk space and write permissions in temp directory.",
+                e
+            )
+        })?;
 
-        let file = temp_file
-            .reopen()
-            .map_err(|e| format!("Failed to open temporary file for writing: {}", e))?;
+        let file = temp_file.reopen().map_err(|e| {
+            format!(
+                "Failed to open temporary file '{}' for writing: {}",
+                temp_file.path().display(),
+                e
+            )
+        })?;
 
-        let writer = BufWriter::with_capacity(8 * 1024 * 1024, file); // 8MB buffer
+        let writer = BufWriter::with_capacity(FILE_ACCUMULATOR_BUFFER_SIZE, file);
 
         Ok(Self {
             summary: Summary::default(),
@@ -799,8 +816,13 @@ fn analyze_file(path: &Path, max_file_size: Option<u64>) -> Result<FileStats, St
 
     // Check file size if limit is specified
     if let Some(max_size) = max_file_size {
-        let metadata = fs::metadata(path)
-            .map_err(|e| format!("Failed to get metadata for {}: {}", path.display(), e))?;
+        let metadata = fs::metadata(path).map_err(|e| {
+            format!(
+                "Failed to get metadata for '{}': {}. File may not exist or be inaccessible.",
+                path.display(),
+                e
+            )
+        })?;
         let file_size = metadata.len();
 
         if file_size > max_size {
@@ -811,7 +833,7 @@ fn analyze_file(path: &Path, max_file_size: Option<u64>) -> Result<FileStats, St
                 max_size
             );
             return Err(format!(
-                "File {} exceeds maximum size ({} > {} bytes)",
+                "File '{}' exceeds maximum size limit ({} bytes > {} bytes). Consider increasing --max-file-size or excluding this file.",
                 path.display(),
                 file_size,
                 max_size
@@ -819,8 +841,13 @@ fn analyze_file(path: &Path, max_file_size: Option<u64>) -> Result<FileStats, St
         }
     }
 
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let content = fs::read_to_string(path).map_err(|e| {
+        format!(
+            "Failed to read file '{}': {}. Ensure the file exists, is readable, and is valid UTF-8.",
+            path.display(),
+            e
+        )
+    })?;
 
     let total_lines = content.lines().count();
     if total_lines == 0 {
@@ -917,14 +944,20 @@ fn analyze_directory<A: StatsAccumulator>(
         return Err(format!("No Rust files found in {}", dir.display()));
     }
 
-    // Setup progress bar
-    let progress = ProgressBar::new(rust_files.len() as u64);
-    progress.set_style(
-        ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("█▓░"),
-    );
+    // Setup progress bar only if we're in a terminal
+    let is_terminal = std::io::stdout().is_terminal();
+    let progress = if is_terminal {
+        let bar = ProgressBar::new(rust_files.len() as u64);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        bar
+    } else {
+        ProgressBar::hidden()
+    };
 
     // Atomic counters
     let skipped_count = Arc::new(AtomicUsize::new(0));
@@ -1122,21 +1155,39 @@ fn output_text_from_accumulator<A: StatsAccumulator>(accumulator: &A) -> Result<
     println!("Summary:");
     println!("  Files: {}", summary.files);
     println!("  Total:");
-    println!("{}", format_line_stats(&summary.total, 4));
+    println!(
+        "{}",
+        format_line_stats(&summary.total, TEXT_OUTPUT_BASE_INDENT)
+    );
     println!("  Production:");
-    println!("{}", format_line_stats(&summary.production, 4));
+    println!(
+        "{}",
+        format_line_stats(&summary.production, TEXT_OUTPUT_BASE_INDENT)
+    );
     println!("  Test:");
-    println!("{}", format_line_stats(&summary.test, 4));
+    println!(
+        "{}",
+        format_line_stats(&summary.test, TEXT_OUTPUT_BASE_INDENT)
+    );
 
     println!("\nFiles:");
     for file in accumulator.iter_files()? {
         println!("  {}:", file.path);
         println!("    Total:");
-        println!("{}", format_line_stats(&file.total, 6));
+        println!(
+            "{}",
+            format_line_stats(&file.total, TEXT_OUTPUT_NESTED_INDENT)
+        );
         println!("    Production:");
-        println!("{}", format_line_stats(&file.production, 6));
+        println!(
+            "{}",
+            format_line_stats(&file.production, TEXT_OUTPUT_NESTED_INDENT)
+        );
         println!("    Test:");
-        println!("{}", format_line_stats(&file.test, 6));
+        println!(
+            "{}",
+            format_line_stats(&file.test, TEXT_OUTPUT_NESTED_INDENT)
+        );
     }
 
     Ok(())
@@ -1167,60 +1218,6 @@ fn output_json_from_accumulator<A: StatsAccumulator>(accumulator: &A) -> Result<
     let report = Report { summary, files };
 
     let json = serde_json::to_string_pretty(&report)
-        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
-    println!("{}", json);
-    Ok(())
-}
-
-/// Outputs the report in plain text format to stdout.
-///
-/// Displays a summary section with aggregated statistics, followed by
-/// detailed statistics for each analyzed file.
-///
-/// # Arguments
-///
-/// * `report` - The analysis report to output
-#[allow(dead_code)]
-fn output_text(report: &Report) {
-    println!("Summary:");
-    println!("  Files: {}", report.summary.files);
-    println!("  Total:");
-    println!("{}", format_line_stats(&report.summary.total, 4));
-    println!("  Production:");
-    println!("{}", format_line_stats(&report.summary.production, 4));
-    println!("  Test:");
-    println!("{}", format_line_stats(&report.summary.test, 4));
-
-    println!("\nFiles:");
-    for file in &report.files {
-        println!("  {}:", file.path);
-        println!("    Total:");
-        println!("{}", format_line_stats(&file.total, 6));
-        println!("    Production:");
-        println!("{}", format_line_stats(&file.production, 6));
-        println!("    Test:");
-        println!("{}", format_line_stats(&file.test, 6));
-    }
-}
-
-/// Outputs the report in JSON format to stdout.
-///
-/// Serializes the report to pretty-printed JSON using serde.
-///
-/// # Arguments
-///
-/// * `report` - The analysis report to output
-///
-/// # Returns
-///
-/// `Ok(())` on success, or `Err(String)` if JSON serialization fails
-///
-/// # Errors
-///
-/// Returns an error if the report cannot be serialized to JSON
-#[allow(dead_code)]
-fn output_json(report: &Report) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(report)
         .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
     println!("{}", json);
     Ok(())
@@ -1351,21 +1348,6 @@ mod tests {
             make_line_stats(10, 2, 3, 0, 5),
             make_line_stats(5, 1, 1, 0, 3),
         )
-    }
-
-    /// Creates a standard test `Report` for output testing.
-    ///
-    /// Contains a summary matching `make_standard_test_file_stats()` with no files.
-    fn make_standard_test_report() -> Report {
-        Report {
-            summary: Summary {
-                files: 1,
-                total: make_line_stats(10, 2, 3, 0, 5),
-                production: make_line_stats(7, 1, 2, 0, 4),
-                test: make_line_stats(3, 1, 1, 0, 1),
-            },
-            files: vec![],
-        }
     }
 
     // ==================== Tests ====================
@@ -1722,19 +1704,25 @@ mod tests {
         std::fs::remove_file(&temp_file).ok();
     }
 
-    /// Tests output_text formatting.
+    /// Tests output_text formatting with accumulator.
     #[test]
     fn test_output_text() {
-        let report = make_standard_test_report();
-        output_text(&report);
-        // Just ensure it doesn't panic
+        let mut acc = InMemoryAccumulator::new();
+        let stats = make_standard_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        let result = output_text_from_accumulator(&acc);
+        assert!(result.is_ok());
     }
 
-    /// Tests output_json formatting.
+    /// Tests output_json formatting with accumulator.
     #[test]
     fn test_output_json() {
-        let report = make_standard_test_report();
-        let result = output_json(&report);
+        let mut acc = InMemoryAccumulator::new();
+        let stats = make_standard_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        let result = output_json_from_accumulator(&acc);
         assert!(result.is_ok());
     }
 
@@ -1841,17 +1829,12 @@ mod tests {
     /// Tests output_text with detailed file statistics.
     #[test]
     fn test_output_text_with_files() {
+        let mut acc = InMemoryAccumulator::new();
         let file_stats = make_detailed_test_file_stats();
-        let mut summary = Summary::default();
-        summary.add_file(&file_stats);
+        acc.add_file(&file_stats).unwrap();
 
-        let report = Report {
-            summary,
-            files: vec![file_stats],
-        };
-
-        output_text(&report);
-        // Just ensure it doesn't panic with file details
+        let result = output_text_from_accumulator(&acc);
+        assert!(result.is_ok());
     }
 
     /// Tests analyze_file with an empty file.
