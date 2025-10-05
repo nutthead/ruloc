@@ -76,6 +76,10 @@ Single-file binary crate (all code in `src/main.rs`):
 - Test detection recursively walks the syntax tree to find test sections
 - Line counting uses simple text analysis, while production/test split uses AST parsing
 
+## Soft rules
+
+- **Rule 1:** Prefer streaming data directly to files to in-memory data-structures
+
 ## Hard rules
 
 - **Rule 1:** Run `cargo fmt` after every conversation that changes or adds news `.rs` files
