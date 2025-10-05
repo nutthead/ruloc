@@ -87,6 +87,20 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      - name: Validate changelog format
+        run: |
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "⚠️  CHANGELOG.md not found (will be created by release-plz)"
+            exit 0
+          fi
+
+          if ! grep -q "^# Changelog" CHANGELOG.md; then
+            echo "❌ Invalid changelog format - missing '# Changelog' header"
+            exit 1
+          fi
+
+          echo "✅ Changelog format is valid"
+
   # Security audit runs in parallel with quick-check
   # Continues on error since advisory warnings shouldn't block PRs
   security:
