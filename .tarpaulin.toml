@@ -15,8 +15,8 @@ fail-under = 80.0
 # Follow symbolic links
 follow-exec = true
 
-# Timeout for test execution (in seconds)
-timeout = 300
+# Timeout for test execution
+timeout = "300s"
 
 # Exclude patterns (none for now, but can add if needed)
 # exclude-files = []

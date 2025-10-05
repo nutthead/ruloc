@@ -163,84 +163,83 @@ ruloc --file src/main.rs --debug --no-color
 
 ### Plain Text
 
-```
+```bash
+$ ruloc --file src/main.rs
 Summary:
   Files: 1
   Total:
-    All lines: 3580
-    Blank lines: 428
-    Comment lines: 156
-    Rustdoc lines: 812
-    Code lines: 2184
+    All lines: 3838
+    Blank lines: 519
+    Comment lines: 141
+    Rustdoc lines: 767
+    Code lines: 2411
   Production:
-    All lines: 2068
-    Blank lines: 234
-    Comment lines: 89
-    Rustdoc lines: 812
-    Code lines: 933
+    All lines: 1537
+    Blank lines: 159
+    Comment lines: 44
+    Rustdoc lines: 586
+    Code lines: 748
   Test:
-    All lines: 1512
-    Blank lines: 194
-    Comment lines: 67
-    Rustdoc lines: 0
-    Code lines: 1251
-
-Files:
-  src/main.rs:
-    Total:
-      All lines: 3580
-      Blank lines: 428
-      Comment lines: 156
-      Rustdoc lines: 812
-      Code lines: 2184
-    Production:
-      All lines: 2068
-      Blank lines: 234
-      Comment lines: 89
-      Rustdoc lines: 812
-      Code lines: 933
-    Test:
-      All lines: 1512
-      Blank lines: 194
-      Comment lines: 67
-      Rustdoc lines: 0
-      Code lines: 1251
+    All lines: 2301
+    Blank lines: 360
+    Comment lines: 97
+    Rustdoc lines: 181
+    Code lines: 1663
 ```
 
 ### JSON
 
-```json
+```bash
+$ ruloc --file src/main.rs --out-json
 {
   "summary": {
     "files": 1,
     "total": {
-      "all-lines": 3580,
-      "blank-lines": 428,
-      "comment-lines": 156,
-      "rustdoc-lines": 812,
-      "code-lines": 2184
+      "all-lines": 3838,
+      "blank-lines": 519,
+      "comment-lines": 141,
+      "rustdoc-lines": 767,
+      "code-lines": 2411
     },
     "production": {
-      "all-lines": 2068,
-      "blank-lines": 234,
-      "comment-lines": 89,
-      "rustdoc-lines": 812,
-      "code-lines": 933
+      "all-lines": 1537,
+      "blank-lines": 159,
+      "comment-lines": 44,
+      "rustdoc-lines": 586,
+      "code-lines": 748
     },
     "test": {
-      "all-lines": 1512,
-      "blank-lines": 194,
-      "comment-lines": 67,
-      "rustdoc-lines": 0,
-      "code-lines": 1251
+      "all-lines": 2301,
+      "blank-lines": 360,
+      "comment-lines": 97,
+      "rustdoc-lines": 181,
+      "code-lines": 1663
     }
   },
   "files": [
     {
       "path": "src/main.rs",
-      "total": { /* ... */ },
-      "production": { /* ... */ },
-      "test": { /* ... */ }
+      "total": {
+        "all-lines": 3838,
+        "blank-lines": 519,
+        "comment-lines": 141,
+        "rustdoc-lines": 767,
+        "code-lines": 2411
+      },
+      "production": {
+        "all-lines": 1537,
+        "blank-lines": 159,
+        "comment-lines": 44,
+        "rustdoc-lines": 586,
+        "code-lines": 748
+      },
+      "test": {
+        "all-lines": 2301,
+        "blank-lines": 360,
+        "comment-lines": 97,
+        "rustdoc-lines": 181,
+        "code-lines": 1663
+      }
     }
   ]
 }
