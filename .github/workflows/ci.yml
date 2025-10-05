@@ -49,9 +49,7 @@ env:
 
 permissions:
   contents: read
-  pull-requests: write
   actions: read
-  checks: write
 
 jobs:
   # Fast-fail checks run before the expensive test matrix
@@ -186,7 +184,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Run unit tests
-        run: cargo test --locked --target ${{ matrix.target }} ${{ matrix.test_args }} -- --test-threads=1
+        run: cargo test --locked --target ${{ matrix.target }} ${{ matrix.test_args }}
 
   # Generates code coverage report using tarpaulin
   # Uploads to Codecov and posts PR comment with coverage summary
@@ -194,6 +192,9 @@ jobs:
     name: Code Coverage
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # Needed for PR coverage comments
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -347,6 +348,9 @@ jobs:
     if: always()
     needs: [quick-check, security, unit-tests, coverage]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write  # Needed for merge queue status checks
     steps:
       - name: Check status
         run: |
