@@ -12,9 +12,6 @@ output-dir = "target/tarpaulin"
 # Fail if coverage is below 80%
 fail-under = 80.0
 
-# Engine selection (Ptrace is the default and most compatible)
-# engine = "llvm"  # Disabled: use default Ptrace engine for better compatibility
-
 # Follow symbolic links
 follow-exec = true
 
