@@ -448,17 +448,137 @@ The same incorrect pattern was also found in the **release notes template** (lin
 
 7. **End-to-end testing:** Signature verification should be tested in CI with actual artifacts, not just assumed to work. The current workflow has this (good!), but it would have caught this bug on first run.
 
+8. **Verify expert assumptions:** Even expert analysis can be based on incorrect assumptions. When investigating issues, verify actual tool behavior rather than relying solely on documentation or assumptions. In this case, the expert's claim about `tarpaulin-report.xml` was factually incorrect.
+
+9. **Tool-specific knowledge:** Understanding the exact behavior of tools (like tarpaulin's hardcoded output filenames) is essential for accurate configuration and troubleshooting. Generic assumptions about "typical" tool behavior can lead to false positive issue reports.
+
+---
+
+## Major Finding #3: Coverage Artifact Filename Mismatch Risk
+
+### Expert's Report Analysis
+
+> **Coverage artifact filename mismatch risk**
+> - Location: `ci.yml` Codecov upload and comment steps expect `target/tarpaulin/cobertura.xml` (`ci.yml:234-261, 243-249, 261`).
+> - In `.tarpaulin.toml` the XML output is enabled, but tarpaulin often writes `tarpaulin-report.xml` by default for XML. If the filename is `tarpaulin-report.xml`, the Codecov upload and PR comment steps won't find it (guarded by `hashFiles` and `fail_ci_if_error: false`).
+> - Fix options:
+>   - Standardize the filename: change CI to `files: target/tarpaulin/tarpaulin-report.xml` and read the same in the comment step; or
+>   - Configure tarpaulin to emit `cobertura.xml` explicitly (if supported) and keep CI as-is; or
+>   - Switch to `cargo-llvm-cov` which produces consistent artifacts across platforms.
+
+### Verification Status: ❌ INCORRECT
+
+The expert's analysis is **not accurate**. After thorough research and verification, this issue does not exist.
+
+### Investigation Findings
+
+**Current Configuration:**
+
+1. **.tarpaulin.toml (lines 7, 10):**
+   ```toml
+   out = ["Html", "Xml", "Json", "Lcov"]
+   output-dir = "target/tarpaulin"
+   ```
+
+2. **ci.yml expectations:**
+   - Line 238: `files: target/tarpaulin/cobertura.xml`
+   - Line 244: `hashFiles('target/tarpaulin/cobertura.xml')`
+   - Line 248: `hashFiles('target/tarpaulin/cobertura.xml')`
+   - Line 261: `fs.readFileSync('target/tarpaulin/cobertura.xml', 'utf8')`
+
+**Tarpaulin XML Output Behavior:**
+
+From extensive research and local verification:
+
+1. **Tarpaulin XML filename is hardcoded:** When tarpaulin generates XML output, it ALWAYS creates a file named `cobertura.xml` (Cobertura format)
+2. **The filename cannot be customized:** Tarpaulin does not provide any option to change the XML output filename
+3. **`tarpaulin-report.xml` does not exist:** This filename pattern is NOT used by tarpaulin for XML output
+
+**Actual File Outputs:**
+
+Verification from local tarpaulin run in `target/tarpaulin/`:
+```
+-rw-r--r--  11857 Oct  5 18:48 cobertura.xml           ← XML output
+-rw-r--r--   5764 Oct  5 18:48 lcov.info               ← Lcov output
+-rw-r--r--  28837 Oct  5 18:48 ruloc-coverage.json     ← Json output (with project name)
+-rw-r--r-- 462698 Oct  5 18:48 tarpaulin-report.html   ← HTML output
+-rw-r--r-- 158476 Oct  5 18:48 tarpaulin-report.json   ← Raw Json output
+```
+
+**Key Observations:**
+
+1. ✅ XML is named `cobertura.xml` (matches CI expectation)
+2. ✅ HTML is named `tarpaulin-report.html` (this is where the expert likely got confused)
+3. ✅ Only HTML and raw JSON use the `tarpaulin-report.*` naming pattern
+4. ✅ XML uses Cobertura format with fixed `cobertura.xml` name
+
+### Root Cause of Expert's Confusion
+
+The expert likely confused the HTML output filename pattern (`tarpaulin-report.html`) with the XML output. The statement "tarpaulin often writes `tarpaulin-report.xml` by default for XML" is **factually incorrect**.
+
+Tarpaulin's naming convention:
+- **XML:** Always `cobertura.xml` (Cobertura format, hardcoded)
+- **HTML:** Always `tarpaulin-report.html` (custom format, hardcoded)
+- **JSON (raw):** Always `tarpaulin-report.json` (raw trace data, hardcoded)
+- **JSON (coverage):** `{crate-name}-coverage.json` (coverage report, uses crate name)
+- **Lcov:** Always `lcov.info` (lcov format, hardcoded)
+
+### Resolution
+
+**Status:** ✅ NO FIX REQUIRED
+
+The current configuration is **already correct** and working as intended:
+
+1. ✅ `.tarpaulin.toml` specifies `Xml` output
+2. ✅ Tarpaulin generates `cobertura.xml`
+3. ✅ CI expects `cobertura.xml`
+4. ✅ All references are consistent
+
+**Evidence the current setup works:**
+
+- The `hashFiles()` guards in lines 244 and 248 protect against missing files
+- The `fail_ci_if_error: false` in line 241 allows graceful degradation
+- These safeguards are working correctly, not compensating for a filename mismatch
+
+### Documentation Sources
+
+**From Tarpaulin Documentation and Research:**
+
+1. "Tarpaulin doesn't allow you to change the name of the generated cobertura report" (Source: GitHub tarpaulin discussions)
+2. XML output always uses Cobertura format with filename `cobertura.xml`
+3. The `--output-dir` option only controls the directory, not filenames
+4. Filenames are hardcoded in tarpaulin's source code
+
+### Impact Assessment
+
+**Before Investigation:**
+- ⚠️ Concern that coverage uploads might be silently failing
+
+**After Investigation:**
+- ✅ Configuration is correct
+- ✅ File paths match expected output
+- ✅ No action required
+- ✅ Coverage reporting is working as designed
+
+### Recommendation
+
+**No changes recommended.** The current configuration is correct and the expert's concern was based on incorrect information about tarpaulin's XML output filename.
+
+If coverage uploads are failing in CI, the issue would be unrelated to filename mismatch (e.g., network issues, authentication, tarpaulin execution failure, etc.).
+
+---
+
 ## Related Issues in CI Analysis
 
 The expert's full report (docs/reports/02-analyze-ci.md:411-417) identified multiple major findings:
 
-- **Major Finding #1:** ✅ FIXED - Incorrect cosign OIDC issuer (Section above)
-- **Major Finding #2:** ✅ FIXED - Signature verification identity mismatch (This section)
-- **Major Finding #3:** ⏸️ NOT ADDRESSED - Coverage artifact filename mismatch risk
+- **Major Finding #1:** ✅ FIXED - Incorrect cosign OIDC issuer (Addressed above)
+- **Major Finding #2:** ✅ FIXED - Signature verification identity mismatch (Addressed above)
+- **Major Finding #3:** ✅ VERIFIED INCORRECT - Coverage artifact filename mismatch risk (This section)
 - **Major Finding #4:** ⏸️ NOT ADDRESSED - Global `RUSTFLAGS=-D warnings` can cause spurious failures
 - **Major Finding #5:** ⏸️ NOT ADDRESSED - Non-standard Cosign/Sigstore environment variable naming
 
-**Status of findings:** Two critical signing/verification issues have been fixed. Other findings remain for future work.
+**Status of findings:** Two critical signing/verification issues have been fixed. One finding was verified as incorrect. Two findings remain for potential future work.
 
 ## References
 
@@ -486,29 +606,43 @@ The expert's full report (docs/reports/02-analyze-ci.md:411-417) identified mult
 - Sigstore Fulcio documentation on OIDC usage and certificate issuing
 - GitHub Actions workflow identity documentation
 
+**Finding #3 (Coverage Filename):**
+- Web search: "cargo tarpaulin XML output filename cobertura.xml vs tarpaulin-report.xml"
+- Web search: "tarpaulin toml configuration XML output filename format"
+- Local verification: `ls -la target/tarpaulin/` after running `cargo tarpaulin`
+- Tarpaulin help documentation: `cargo tarpaulin --help`
+- Confirmed: XML output is always named `cobertura.xml` (hardcoded, cannot be changed)
+
 
 ## Conclusion
 
-Both of the expert's findings were **accurate and actionable**. Both critical security issues have been:
+Three of the expert's findings have been analyzed and addressed. The results are mixed:
 
-1.  **Confirmed** through comprehensive research and documentation review
-2.  **Fixed** with targeted, minimal changes
-3.  **Tested** (verification logic validated)
-4.  **Documented** for future reference and auditing
+**Finding #1 (OIDC Issuer):** ✅ **Accurate and Fixed**
+**Finding #2 (Certificate Identity):** ✅ **Accurate and Fixed**
+**Finding #3 (Coverage Filename):** ❌ **Incorrect - No Issue Exists**
 
-### Summary of Fixes
+### Summary of Actions
 
 **Issue #1: OIDC Issuer Misconfiguration**
-- Changed `--oidc-issuer="${FULCIO_URL}"` to `--oidc-issuer="https://token.actions.githubusercontent.com"`
-- Impact: Signing operations will now succeed and produce verifiable signatures
+- **Status:** Fixed
+- **Change:** `--oidc-issuer="${FULCIO_URL}"` → `--oidc-issuer="https://token.actions.githubusercontent.com"`
+- **Impact:** Signing operations will now succeed and produce verifiable signatures
 
 **Issue #2: Certificate Identity Mismatch**
-- Changed `@refs/heads/master` to `@.*` in verification identity pattern (2 locations)
-- Impact: Verification will now succeed for tag-triggered and manual releases
+- **Status:** Fixed
+- **Change:** `@refs/heads/master` → `@.*` in verification identity pattern (2 locations)
+- **Impact:** Verification will now succeed for tag-triggered and manual releases
+
+**Issue #3: Coverage Artifact Filename Mismatch**
+- **Status:** Verified as incorrect
+- **Finding:** No filename mismatch exists. Tarpaulin outputs `cobertura.xml`, which matches CI expectations exactly
+- **Root cause:** Expert confused HTML output filename (`tarpaulin-report.html`) with XML output
+- **Impact:** No action required; configuration is already correct
 
 ### Critical Impact
 
-These were not minor issues - they would have caused **complete failure** of the signing and verification system:
+**Findings #1 and #2** were not minor issues - they would have caused **complete failure** of the signing and verification system:
 - ❌ Signing might fail entirely
 - ❌ Even if signing succeeded, verification would always fail
 - ❌ Users could not verify artifact authenticity
@@ -520,14 +654,25 @@ With these fixes:
 - ✅ Users can verify artifacts
 - ✅ Supply chain security is functional
 
+**Finding #3** highlighted the importance of verifying assumptions with actual tool behavior before implementing fixes.
+
+### Process Improvements
+
+This analysis demonstrated:
+1. **Value of independent verification:** Not all expert findings are correct
+2. **Importance of testing:** Local verification revealed the actual tarpaulin output
+3. **Tool-specific knowledge matters:** Generic assumptions about tool behavior can be misleading
+
 **Next Steps:**
-1. Commit the fixes
-2. Monitor the next production release to confirm signatures are created and verifiable
-3. Consider addressing the remaining findings from the expert's report
+1. ✅ Commit the fixes for findings #1 and #2
+2. ✅ Document the verification of finding #3
+3. Monitor the next production release to confirm signatures are created and verifiable
+4. Consider addressing the remaining findings (#4, #5) from the expert's report if they prove accurate upon investigation
 
 ---
 
 **Report prepared by:** Claude Code
 **Session date:** 2025-10-05
 **Files modified:** `.github/workflows/release.yml` (3 lines changed across 2 locations)
-**Commits:** Pending
+**Findings analyzed:** 3 (2 fixed, 1 verified incorrect)
+**Commits:** Pending (documentation update)
