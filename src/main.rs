@@ -2955,5 +2955,78 @@ code();"#;
 
         // Verify line content is preserved
         assert!(format_debug_line(line, LineType::Code, false, false).contains(line));
+
+        // Test with colors enabled
+        let colored_output = format_debug_line(line, LineType::Code, false, true);
+        assert!(colored_output.contains(line));
+    }
+
+    /// Tests InMemoryAccumulator::default() implementation.
+    #[test]
+    fn test_in_memory_accumulator_default() {
+        let acc = InMemoryAccumulator::default();
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 0);
+        assert_eq!(summary.total.all_lines, 0);
+    }
+
+    /// Tests output_file_debug function with a test file.
+    #[test]
+    fn test_output_file_debug() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_debug_output.rs");
+
+        let content = r#"/// Doc comment
+fn main() {
+    // Comment
+    println!("test");
+}
+
+#[test]
+fn test() {
+    assert!(true);
+}"#;
+
+        std::fs::write(&temp_file, content).unwrap();
+
+        // Test without colors
+        let result = output_file_debug(&temp_file, false, None);
+        assert!(result.is_ok());
+
+        // Test with colors
+        let result = output_file_debug(&temp_file, true, None);
+        assert!(result.is_ok());
+
+        // Test with size limit that allows file
+        let result = output_file_debug(&temp_file, false, Some(10000));
+        assert!(result.is_ok());
+
+        // Test with size limit that rejects file
+        let result = output_file_debug(&temp_file, false, Some(10));
+        assert!(result.is_err());
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests output_file_debug with empty file.
+    #[test]
+    fn test_output_file_debug_empty() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_debug_empty.rs");
+
+        std::fs::write(&temp_file, "").unwrap();
+
+        let result = output_file_debug(&temp_file, false, None);
+        assert!(result.is_ok());
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests output_file_debug with nonexistent file.
+    #[test]
+    fn test_output_file_debug_nonexistent() {
+        let path = std::path::Path::new("/nonexistent/file.rs");
+        let result = output_file_debug(path, false, None);
+        assert!(result.is_err());
     }
 }
