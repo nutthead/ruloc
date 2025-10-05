@@ -320,7 +320,7 @@ jobs:
               echo "Signing $file"
               cosign sign-blob \
                 --yes \
-                --oidc-issuer="${FULCIO_URL}" \
+                --oidc-issuer="https://token.actions.githubusercontent.com" \
                 --output-signature="${file}.sig" \
                 --output-certificate="${file}.crt" \
                 "$file"
