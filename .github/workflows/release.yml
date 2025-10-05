@@ -1,0 +1,560 @@
+# ============================================================================
+# Release Pipeline
+# ============================================================================
+# Automated production releases for ruloc
+# - Triggered by tags or manual dispatch inputs
+# - Builds cross-platform artifacts with cargo
+# - Generates SBOMs and signs artifacts via Sigstore
+# - Publishes GitHub releases and crates.io packages
+# - Posts release notes with installation guidance
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 1.2.3)'
+        required: true
+        type: string
+      skip_publish:
+        description: 'Skip publishing to crates.io'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+# Environment variables for release builds and Sigstore signing
+env:
+  RUST_VERSION: "1.90.0"
+  CARGO_TERM_COLOR: always
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  RUST_BACKTRACE: short
+  # Sigstore configuration for keyless artifact signing
+  COSIGN_EXPERIMENTAL: 1  # Enable experimental keyless signing
+  FULCIO_URL: https://fulcio.sigstore.dev  # Certificate authority
+  REKOR_URL: https://rekor.sigstore.dev  # Transparency log
+
+jobs:
+  # Extracts and validates version from tag or manual input
+  # All other jobs depend on this for version consistency
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          fi
+
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
+            echo "Invalid version format: $VERSION"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing version: ${VERSION}"
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@02be93da58aa71fb456aa9c43b301149248829d8 # v1.15.1
+        with:
+          toolchain: 1.90.0
+
+      - name: Verify version matches Cargo.toml
+        run: |
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          if [[ "${{ steps.version.outputs.version }}" != "$CARGO_VERSION" ]]; then
+            echo "Version mismatch: tag/input=${{ steps.version.outputs.version }} vs Cargo.toml=$CARGO_VERSION"
+            exit 1
+          fi
+
+  # Runs security audit and generates Software Bill of Materials (SBOM)
+  # SBOM provides transparency about dependencies in the release
+  security-scan:
+    name: Security Audit & SBOM
+    runs-on: ubuntu-latest
+    needs: [prepare-release]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@02be93da58aa71fb456aa9c43b301149248829d8 # v1.15.1
+        with:
+          toolchain: 1.90.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-on-failure: true
+          prefix-key: "v2-rust"
+          key: security
+
+      - name: Setup tool cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin
+          key: cargo-tools-${{ runner.os }}-audit-cyclonedx-deny
+          restore-keys: |
+            cargo-tools-${{ runner.os }}-
+
+      - name: Install security tools
+        run: |
+          command -v cargo-audit || cargo install cargo-audit --locked
+          command -v cargo-cyclonedx || cargo install cargo-cyclonedx --locked
+          command -v cargo-deny || cargo install cargo-deny --locked
+
+      - name: Run security audit
+        run: |
+          cargo audit --json > audit-report.json
+          cargo deny check --show-stats || true
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx --format json --spec-version 1.5 --override-filename sbom
+          cargo cyclonedx --format xml --spec-version 1.5 --override-filename sbom
+
+      - name: Upload security artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-reports
+          path: |
+            audit-report.json
+            sbom.json
+            sbom.xml
+          retention-days: 90
+
+  # Builds optimized release binaries for all supported platforms
+  # Uses cross-compilation for ARM and RISC-V targets
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: [prepare-release]
+    strategy:
+      fail-fast: false  # Continue building other targets if one fails
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            use_cross: false
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: false
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+
+          - os: macos-14
+            target: aarch64-apple-darwin
+            use_cross: false
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            use_cross: false
+
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            use_cross: true
+
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@02be93da58aa71fb456aa9c43b301149248829d8 # v1.15.1
+        with:
+          toolchain: 1.90.0
+          target: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-on-failure: true
+          prefix-key: "v2-rust"
+          key: ${{ matrix.target }}
+          workspaces: ". -> target"
+
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@5ab30948b991e8d6aa5a6c1e33c6aea130c6de65 # v2.62.12
+        with:
+          tool: cross
+
+      - name: Build release binary
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --locked --release --target ${{ matrix.target }}
+          else
+            cargo build --locked --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+        env:
+          CARGO_PROFILE_RELEASE_LTO: fat
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+          CARGO_PROFILE_RELEASE_OPT_LEVEL: 3
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+          CARGO_PROFILE_RELEASE_PANIC: abort
+
+      - name: Package artifacts
+        id: package
+        shell: bash
+        run: |
+          BINARY_NAME="ruloc"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            BINARY_NAME="${BINARY_NAME}.exe"
+          fi
+
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          ARCHIVE_NAME="ruloc-${VERSION}-${{ matrix.target }}"
+
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${BINARY_NAME}"
+          cp README.md LICENSE dist/
+
+          ARCHIVE_BASENAME="${ARCHIVE_NAME}.tar.gz"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            ARCHIVE_BASENAME="${ARCHIVE_NAME}.zip"
+          fi
+
+          pushd dist >/dev/null
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "../${ARCHIVE_BASENAME}" ./*
+          else
+            tar -czf "../${ARCHIVE_BASENAME}" .
+          fi
+
+          if [[ "${{ matrix.os }}" == "macos-14" ]]; then
+            shasum -a 256 "../${ARCHIVE_BASENAME}" > "../${ARCHIVE_NAME}.sha256"
+          else
+            sha256sum "../${ARCHIVE_BASENAME}" > "../${ARCHIVE_NAME}.sha256"
+          fi
+          popd >/dev/null
+
+          mv "${ARCHIVE_BASENAME}" dist/
+          mv "${ARCHIVE_NAME}.sha256" dist/
+          echo "archive=${ARCHIVE_BASENAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          retention-days: 7
+
+  # Generates SLSA Build Level 3 provenance and signs artifacts
+  # Provides cryptographic proof of build integrity using Sigstore
+  attestation:
+    name: Generate Attestations
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Sigstore keyless signing
+      attestations: write  # Required for GitHub attestations
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: artifacts
+          pattern: binary-*
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        with:
+          cosign-release: 'v2.4.0'
+
+      - name: Generate build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: 'artifacts/**/*.tar.gz'
+          subject-name: 'ruloc'
+          push-to-registry: true
+
+      - name: Generate Windows provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: 'artifacts/**/*.zip'
+          subject-name: 'ruloc'
+          push-to-registry: true
+
+      - name: Sign artifacts with cosign
+        run: |
+          for file in artifacts/**/*.{tar.gz,zip}; do
+            if [[ -f "$file" ]]; then
+              echo "Signing $file"
+              cosign sign-blob \
+                --yes \
+                --oidc-issuer="${FULCIO_URL}" \
+                --output-signature="${file}.sig" \
+                --output-certificate="${file}.crt" \
+                "$file"
+            fi
+          done
+
+      - name: Upload attestation artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: attestations
+          path: |
+            artifacts/**/*.sig
+            artifacts/**/*.crt
+          retention-days: 90
+
+  generate-changelog:
+    name: Generate Changelog
+    needs: [prepare-release]
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@5ab30948b991e8d6aa5a6c1e33c6aea130c6de65 # v2.62.12
+        with:
+          tool: git-cliff
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p')
+
+          if [[ -n "$PREV_TAG" ]]; then
+            echo "Generating changelog from $PREV_TAG to v$VERSION"
+            CHANGELOG=$(git-cliff "$PREV_TAG"..HEAD --strip all)
+          else
+            echo "Generating changelog for all commits"
+            CHANGELOG=$(git-cliff --strip all)
+          fi
+
+          echo "$CHANGELOG" > changelog.md
+
+          {
+            echo 'changelog<<EOF'
+            echo "$CHANGELOG"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: changelog
+          path: changelog.md
+          retention-days: 7
+
+  # Creates GitHub release with binaries, signatures, and SBOM
+  # Waits for all artifacts to be ready before publishing
+  publish-release:
+    name: Publish GitHub Release
+    needs: [prepare-release, build-binaries, attestation, security-scan, generate-changelog]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create releases
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: release-artifacts
+
+      - name: Generate release notes
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+
+          cat > release-notes.md << 'EOF'
+          ## 🚀 ruloc v${{ needs.prepare-release.outputs.version }}
+
+          ### 📊 Release Metrics
+          - **SLSA Level**: 3 ✅
+          - **Signed**: Yes (Sigstore/Cosign) ✅
+          - **Attestation**: Available ✅
+          - **SBOM**: Included (CycloneDX format) ✅
+
+          ### 📝 What's Changed
+          ${{ needs.generate-changelog.outputs.changelog }}
+
+          ### 🔒 Security
+          All release artifacts are signed using Sigstore's keyless signing and include SLSA provenance attestations.
+
+          To verify signatures:
+          ```bash
+          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
+          cosign verify-blob \
+            --certificate ruloc-${VERSION}-<platform>.tar.gz.crt \
+            --signature ruloc-${VERSION}-<platform>.tar.gz.sig \
+            --certificate-identity-regexp "$WORKFLOW_ID" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            ruloc-${VERSION}-<platform>.tar.gz
+          ```
+
+          ### 📦 Installation
+
+          #### Cargo
+          ```bash
+          cargo install ruloc
+          ```
+
+          #### macOS (Apple Silicon)
+          ```bash
+          PLATFORM="aarch64-apple-darwin"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          curl -L "${DOWNLOAD_URL}/ruloc-${VERSION}-${PLATFORM}.tar.gz" | tar xz
+          sudo mv ruloc /usr/local/bin/
+          ```
+
+          #### Linux
+          ```bash
+          PLATFORM="x86_64-unknown-linux-gnu"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          curl -L "${DOWNLOAD_URL}/ruloc-${VERSION}-${PLATFORM}.tar.gz" | tar xz
+          sudo mv ruloc /usr/local/bin/
+          ```
+
+          ### 🏗️ Supported Platforms
+          - Linux (x86_64, aarch64, armv7) - glibc and musl
+          - macOS (Apple Silicon - M1/M2/M3/M4 and later)
+          - Windows (x86_64, ARM64)
+          - RISC-V (experimental)
+
+          ---
+          *Released with ❤️ using GitHub Actions, release-plz, and Sigstore*
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
+        with:
+          tag_name: v${{ needs.prepare-release.outputs.version }}
+          name: ruloc v${{ needs.prepare-release.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(needs.prepare-release.outputs.version, '-') }}
+          files: |
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
+            release-artifacts/**/*.sha256
+            release-artifacts/**/*.sig
+            release-artifacts/**/*.crt
+            release-artifacts/security-reports/*
+          generate_release_notes: false
+
+  # Publishes the crate to crates.io after GitHub release succeeds
+  # Can be skipped via workflow_dispatch input for testing
+  publish-crate:
+    name: Publish to crates.io
+    needs: [publish-release]
+    if: github.event.inputs.skip_publish != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@02be93da58aa71fb456aa9c43b301149248829d8 # v1.15.1
+        with:
+          toolchain: 1.90.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          cache-on-failure: false
+
+      - name: Verify package
+        run: |
+          cargo package --locked --allow-dirty
+          cargo package --locked --list
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  verify-release:
+    name: Verify Release
+    needs: [prepare-release, publish-release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+
+      - name: Verify signatures
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+          ARTIFACT="ruloc-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+
+          curl -L -o test-artifact.tar.gz "${BASE_URL}/${ARTIFACT}"
+          curl -L -o test-artifact.tar.gz.sig "${BASE_URL}/${ARTIFACT}.sig"
+          curl -L -o test-artifact.tar.gz.crt "${BASE_URL}/${ARTIFACT}.crt"
+
+          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
+          cosign verify-blob \
+            --certificate test-artifact.tar.gz.crt \
+            --signature test-artifact.tar.gz.sig \
+            --certificate-identity-regexp "$WORKFLOW_ID" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            test-artifact.tar.gz
+
+      - name: Verify crate publication
+        if: github.event.inputs.skip_publish != 'true'
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+          # Poll crates.io for the published version with exponential backoff (max 10 attempts, up to ~5 min)
+          for i in {1..10}; do
+            PUBLISHED_VERSION=$(curl -s "https://crates.io/api/v1/crates/ruloc/${VERSION}" | jq -r '.version.num')
+            if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
+              echo "Crate version $VERSION is available on crates.io."
+              break
+            else
+              echo "Crate version $VERSION not yet available on crates.io. Attempt $i/10. Retrying in $((i * 10)) seconds..."
+              sleep $((i * 10))
+            fi
+            if [ "$i" -eq 10 ]; then
+              echo "Crate version $VERSION did not appear on crates.io after $i attempts. Failing."
+              exit 1
+            fi
+          done
