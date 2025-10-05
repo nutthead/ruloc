@@ -218,6 +218,7 @@ jobs:
         uses: cargo-bins/cargo-binstall@38e8f5e4c386b611d51e8aa997b9a06a3c8eb67a # v1.15.6
 
       - name: Install and run tarpaulin
+        id: tarpaulin
         run: |
           cargo binstall --force --no-confirm --locked cargo-tarpaulin || cargo install --locked cargo-tarpaulin
 
@@ -232,17 +233,18 @@ jobs:
           EXIT_CODE=$?
           set -e
 
+          # Store exit code for later evaluation
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ Coverage passed (above threshold)"
           elif [ $EXIT_CODE -eq 2 ]; then
-            echo "⚠️  Coverage below threshold - review required"
+            echo "⚠️  Coverage below threshold - will fail after uploading report"
             echo "Uploading report for analysis..."
-            # Make this blocking by uncommenting:
-            # exit 2
           else
             echo "❌ Tarpaulin failed (exit code: $EXIT_CODE)"
             echo "This indicates test failures or compilation errors"
-            exit $EXIT_CODE  # Fail on real errors
+            exit $EXIT_CODE  # Fail immediately on real errors
           fi
 
       - name: Upload coverage to Codecov
@@ -355,6 +357,13 @@ jobs:
               repo: context.repo.repo,
               body
             });
+
+      - name: Enforce coverage threshold
+        if: always() && steps.tarpaulin.outputs.exit_code == '2'
+        run: |
+          echo "❌ Coverage is below the required threshold (80%)"
+          echo "Review the coverage report uploaded to Codecov for details"
+          exit 1
 
   # Final status check required by branch protection
   ci-success:
