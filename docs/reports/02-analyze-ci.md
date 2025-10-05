@@ -32,12 +32,55 @@ Note on concurrency
 - ci.yml uses a concurrency group keyed by workflow name and PR number or ref; new runs cancel in-progress ones for the same PR/branch.
 
 Overall interdependency (high level)
-```
-PR → ci.yml → merge → push to master → (if Cargo.toml version changed) → release-plz.yml → Tag vX.Y.Z → release.yml → GitHub Release (+ optional crates.io publish)
 
-Manual paths: Maintainer can trigger ci.yml, release.yml, or publish-crate.yml via workflow_dispatch.
-Scheduled path: ci.yml runs weekly via cron.
-Merge Queue path: ci.yml via merge_group events.
+```mermaid
+flowchart LR
+  %% Actors
+  Dev[Developer]
+  Maint[Maintainer]
+  Sch[Scheduler]
+  MQ[Merge Queue]
+
+  %% Events
+  EPR[pull_request]
+  EPUSH[push master via merge]
+  EMG[merge_group]
+  ECRON[schedule]
+  EDISP_CI[workflow dispatch ci]
+  EDISP_REL[workflow dispatch release]
+  EDISP_PUB[workflow dispatch publish]
+  ETAG[push tag vX.Y.Z]
+
+  %% Workflows
+  CI[ci.yml]
+  RPR[release-pr.yml]
+  RPLZ[release-plz.yml]
+  REL[release.yml]
+  PUB[publish-crate.yml]
+
+  %% CI triggers
+  Dev --> EPR --> CI
+  Sch --> ECRON --> CI
+  MQ --> EMG --> CI
+  Maint --> EDISP_CI --> CI
+
+  %% Merge to master produces push event
+  CI --> Merge[Merge PR to master]
+  Maint --> Merge
+  Merge --> EPUSH
+
+  %% Release automation on push to master
+  EPUSH --> RPR
+  EPUSH --> RPLZ
+  RPLZ --> CreateTag[Create tag vX.Y.Z] --> ETAG
+  ETAG --> REL
+
+  %% Manual releases and publish
+  Maint --> EDISP_REL --> REL
+  REL --> GHRel[GitHub Release]
+  REL -->|optional| Crates
+  Maint --> EDISP_PUB --> PUB
+  PUB --> Crates
 ```
 
 ## Global Interactions (Sequence)
@@ -50,94 +93,101 @@ sequenceDiagram
   actor Maint as Maintainer
   actor MQ as Merge Queue
   actor Sch as Scheduler
-  participant GH as GitHub Events Router
+  participant GH as GitHub Events
   participant CI as ci.yml
   participant RP as release-pr.yml
   participant RTag as release-plz.yml
   participant Rel as release.yml
   participant Pub as publish-crate.yml
   participant CC as Codecov
-  participant Sig as Sigstore (Fulcio/Rekor)
+  participant Sig as Sigstore
   participant Cr as crates.io
 
-  Dev->>GH: Open PR / Push to master (path-filtered)
-  Fork->>GH: Open PR from fork (path-filtered)
-  MQ->>GH: merge_group checks_requested
+  Dev->>GH: Open PR
+  Fork->>GH: Open PR from fork
+  MQ->>GH: checks_requested (merge_group)
   Sch->>GH: Weekly cron (Mon 00:00 UTC)
-  Maint->>GH: Manual workflow_dispatch
+  Maint->>GH: workflow_dispatch
 
-  GH-->>CI: Trigger ci.yml (pull_request/push/merge_group/dispatch/schedule)
-  Note over CI: Concurrency cancels in-progress runs for same PR/ref
+  GH->>CI: Trigger (PR/push/merge_group/dispatch/schedule)
+  Note over CI: Concurrency cancels in-progress runs for same ref
 
-  par Fast checks
-    CI-->>CI: quick-check (fmt, clippy, doc)
+  par Quick checks
+    CI->>CI: fmt, clippy, doc
   and Advisory scan
-    CI-->>CI: security (cargo-audit, cargo-deny; continue-on-error)
+    CI->>CI: audit + deny (soft fail)
   end
-  alt quick-check success
-    CI-->>CI: unit-tests matrix (Linux/macOS/Windows + musl)
-    CI-->>CI: coverage (tarpaulin) → upload to Codecov
-    CI-->>CC: Upload cobertura XML
-    opt PR from same repo and report exists
-      CI-->>GH: Comment coverage summary on PR
+
+  alt Quick checks succeed
+    CI->>CI: unit-tests (matrix)
+    CI->>CI: coverage (tarpaulin)
+    CI->>CC: Upload coverage
+    opt Same-repo PR and report exists
+      CI->>GH: Comment coverage summary
     end
-  else quick-check failed
-    CI-->>GH: Report failure (ci-success gate will fail)
-  end
-  opt merge_group event
-    CI-->>GH: Write merge-queue 'CI Status' check (success/failure)
+  else Quick checks fail
+    CI->>GH: Report failure
   end
 
-  Dev->>GH: Push to master with Cargo.toml version bump
-  GH-->>RTag: Trigger release-plz.yml (guarded; version change only)
-  RTag-->>GH: Create annotated tag vX.Y.Z
-  GH-->>Rel: Trigger release.yml on tag push
-
-  Maint->>GH: Manual release.yml (workflow_dispatch)
-  Rel-->>Rel: Prepare version → security scan → build matrix → attest/sign → changelog → GitHub Release
-  Rel-->>Sig: Keyless signing and provenance
-  Rel-->>GH: Publish GitHub Release with assets
-  alt skip_publish is false
-    Rel-->>Cr: cargo publish
+  opt merge_group
+    CI->>GH: Set CI Status check
   end
-  Rel-->>GH: Verify release (sig + optional crates.io indexing)
 
-  Maint->>GH: Manual publish-crate.yml (fallback)
-  GH-->>Pub: Trigger publish-crate.yml with version
-  Pub-->>GH: Verify GH release tag exists
-  Pub-->>Cr: Publish to crates.io (if not already)
+  Maint->>GH: Merge PR to master with version bump
+  GH->>RTag: Trigger release-plz (version changed)
+  RTag->>GH: Create tag vX.Y.Z
+  GH->>Rel: Trigger release on tag
+  Maint->>Rel: Or manual dispatch
+  Rel->>Sig: Sign and attest
+  Rel->>GH: Create GitHub Release
+  alt skip_publish = false
+    Rel->>Cr: cargo publish
+  end
+  Rel->>GH: Verify signatures and indexing
+  Maint->>Pub: Manual crates.io publish fallback
+  Pub->>Cr: Publish if needed
 ```
 
 ## ci.yml (Detailed Flowchart)
 
 ```mermaid
 flowchart TD
-  A[Event received] --> B{Event type}
-  B -->|pull_request| P[Check path filters]
-  B -->|push to master| P
-  B -->|merge_group| P
-  B -->|workflow_dispatch| P
-  B -->|schedule| P
-  P -->|paths match| C[Apply concurrency: cancel in-progress]
-  P -->|paths don't match| X([Exit])
+  %% Actors and events
+  Dev[Developer] --> EPR[pull_request]
+  Maint[Maintainer] --> Merge[Merge PR to master]
+  Merge --> EPUSH[push master via merge]
+  MQ[Merge Queue] --> EMG[merge_group]
+  Sch[Scheduler] --> ECRON[schedule]
+  Maint --> EDISP[workflow dispatch]
 
-  C --> Q[quick-check: fmt, clippy, doc]
-  C --> S[security: cargo-audit, cargo-deny (continue-on-error)]
-  Q --> D{quick-check status}
-  D -->|fail| F[[ci-success will fail]]
-  D -->|success| U[unit-tests: matrix linux/macos/windows/musl]
-  U --> V[coverage: tarpaulin]
-  V --> W{PR from same repo AND report exists?}
-  W -->|yes| R[Comment coverage on PR]
-  W -->|no| Z[Skip comment]
-  V --> Y[Upload to Codecov]
-  R --> G[ci-success gate]
-  Z --> G
-  Y --> G
-  S --> G
-  G --> H{merge_group?}
-  H -->|yes| M[Set 'CI Status' check via github-script]
-  H -->|no| Done([Done])
+  %% Event routing: path filters apply only to PR and push
+  EPR --> PF[Check path filters]
+  EPUSH --> PF
+  EMG --> CONC
+  ECRON --> CONC
+  EDISP --> CONC
+
+  PF -->|match| CONC[Apply concurrency: cancel in progress]
+  PF -->|no match| EXIT((Exit))
+
+  %% Jobs
+  CONC --> QC[quick-check: fmt, clippy, doc]
+  CONC --> SEC[security: audit and deny, soft fail]
+  QC --> QRES{quick-check ok?}
+  QRES -->|no| GATE[ci-success gate]
+  QRES -->|yes| UT[unit-tests: OS+target matrix]
+  UT --> COV[coverage: tarpaulin]
+  COV --> COMM{same-repo PR and report?}
+  COMM -->|yes| COMMENT[Comment coverage on PR]
+  COMM -->|no| SKIP[Skip comment]
+  COV --> CODECOV[Upload to Codecov]
+  COMMENT --> GATE
+  SKIP --> GATE
+  CODECOV --> GATE
+  SEC --> GATE
+  GATE --> MERGEQ{merge_group event?}
+  MERGEQ -->|yes| SETCHECK[Set CI Status check]
+  MERGEQ -->|no| DONE((Done))
 ```
 
 ## release-pr.yml (Release PR automation)
@@ -145,31 +195,43 @@ flowchart TD
 ```mermaid
 sequenceDiagram
   autonumber
-  actor Dev as Developer
+  actor Maint as Maintainer
   participant GH as GitHub
-  participant W as Release PR Workflow
-  participant RP as release-plz-action (release-pr)
-  participant PR as Pull Request
+  participant W as release-pr.yml
+  participant RP as release plz action
+  participant PR as Release PR
+  participant CI as ci.yml
 
-  Dev->>GH: Push to master (path-filtered)
-  GH-->>W: Trigger release-pr.yml
-  W->>W: Skip if commit message contains [skip ci]
-  W->>W: Validate secret NH_RELEASE_PLZ_TOKEN (PAT)
-  W->>RP: Run release-plz command 'release-pr'
-  RP-->>PR: Open/Update release PR using PAT
-  Note over PR: Using PAT ensures CI runs on PR updates
+  Maint->>GH: Merge PR to master (push event)
+  GH->>W: Trigger release-pr.yml (paths filtered)
+
+  alt Commit message has skip-ci hint
+    W->>GH: Skip workflow (job condition)
+  else Proceed
+    W->>W: Validate NH_RELEASE_PLZ_TOKEN exists
+    alt Token missing
+      W-->>Maint: Fail with guidance to create PAT
+    else Token present
+      W->>W: Checkout with PAT
+      W->>W: Setup Rust and cache
+      W->>RP: Run release-plz command release-pr
+      RP->>PR: Open or update Release PR using PAT
+      PR->>GH: PR opened or synchronize
+      GH->>CI: Trigger ci.yml for Release PR
+    end
+  end
 ```
 
 ```mermaid
 flowchart TD
-  A[Push to master] --> B[Check paths]
-  B -->|no match| X([Exit])
-  B -->|match| C{Commit message contains [skip ci]?}
+  A[Merge PR to master] --> B[Check paths]
+  B -->|no match| X((Exit))
+  B -->|match| C{Commit message contains skip-ci hint?}
   C -->|yes| X
   C -->|no| D{Secret NH_RELEASE_PLZ_TOKEN set?}
   D -->|no| E[[Fail with guidance]]
   D -->|yes| F[Checkout with PAT]
-  F --> G[Install toolchain/cache]
+  F --> G[Install toolchain and cache]
   G --> H[release-plz release-pr]
   H --> I[Release PR opened/updated]
 ```
@@ -186,29 +248,29 @@ sequenceDiagram
   participant Tag as vX.Y.Z tag
   participant Rel as release.yml
 
-  Dev->>GH: Push to master with Cargo.toml change
-  GH-->>W: Trigger release-plz.yml (guarded against loops)
+  Dev->>GH: Merge PR to master with Cargo.toml change
+  GH->>W: Trigger release-plz.yml (guarded against loops)
   W->>W: Diff Cargo.toml: PREV_VERSION vs CURR_VERSION
   alt Version changed
     W->>RP: release-plz command 'release'
-    RP-->>Tag: Create annotated tag vCURR
+    RP->>Tag: Create annotated tag vCURR
     Tag->>Rel: Trigger release.yml
   else No change
-    W-->>GH: Exit (no tag)
+    W->>GH: Exit (no tag)
   end
 ```
 
 ```mermaid
 flowchart TD
-  A[Push to master] --> B[Check paths]
-  B -->|no match| X([Exit])
-  B -->|match| C{Pusher is github-actions[bot]?}
+  A[Merge PR to master] --> B[Check paths]
+  B -->|no match| X((Exit))
+  B -->|match| C{Pusher is GitHub Actions bot?}
   C -->|yes| X
-  C -->|no| D{Commit contains [skip ci]?}
+  C -->|no| D{Commit contains skip-ci hint?}
   D -->|yes| X
   D -->|no| E{Was Cargo.toml modified?}
   E -->|no| X
-  E -->|yes| F[Read PREV_VERSION from HEAD~1]
+  E -->|yes| F["Read PREV_VERSION from HEAD~1"]
   F --> G[Read CURR_VERSION from HEAD]
   G --> H{PREV_VERSION != CURR_VERSION?}
   H -->|no| X
@@ -233,28 +295,37 @@ sequenceDiagram
   participant PubRel as publish-release
   participant PubCr as publish-crate (optional)
   participant Ver as verify-release
-  participant Sig as Sigstore (Fulcio/Rekor)
+  participant Sig as Sigstore
   participant GHRel as GitHub Release
   participant Cr as crates.io
 
-  GH-->>R: Trigger on push tag v*.*.*
-  Maint->>R: Or manual workflow_dispatch with inputs
-  R->>Prep: Extract version from tag/input; validate; compare with Cargo.toml
-  Prep-->>R: version output
+  GH-->>R: Trigger on tag push
+  Maint->>R: Manual dispatch with inputs
+  R->>Prep: Extract version, validate, compare to Cargo.toml
+  Prep-->>R: Version output
   par Parallel stage
-    R->>Sec: cargo-audit, cargo-deny, CycloneDX SBOM → upload
-    R->>Build: cargo/cross build per target → package → checksum → upload
-    R->>Cliff: git-cliff changelog → upload
+    R->>Sec: Run audit and deny checks
+    R->>Sec: Generate CycloneDX SBOM
+    Sec-->>R: Upload security artifacts
+    R->>Build: Build binaries for all targets
+    R->>Build: Package and compute checksums
+    Build-->>R: Upload build artifacts
+    R->>Cliff: Generate changelog
+    Cliff-->>R: Upload changelog
   end
-  R->>Att: Download artifacts; attest-build-provenance; cosign sign-blob
-  Att->>Sig: Keyless signing and Rekor logging
-  R->>PubRel: Compose notes; create GitHub Release with assets
-  PubRel->>GHRel: Publish release
-  alt skip_publish = false
-    R->>PubCr: cargo publish to crates.io
-    PubCr->>Cr: Publish crate version
+  R->>Att: Download artifacts
+  R->>Att: Generate build provenance
+  R->>Att: Cosign sign blobs
+  Att->>Sig: Write to Sigstore services
+  R->>PubRel: Create GitHub Release
+  PubRel->>GHRel: Publish release assets
+  alt Publish to crates
+    R->>PubCr: Publish crate to crates.io
+    PubCr->>Cr: Crate published
+  else Skip publish
+    R->>Ver: Continue without crates.io publish
   end
-  R->>Ver: Verify cosign signatures and (optionally) crate indexing
+  R->>Ver: Verify signatures and crate availability
 ```
 
 ```mermaid
@@ -273,7 +344,7 @@ flowchart TD
   I -->|yes| J[verify-release]
   I -->|no| K[publish-crate: cargo publish]
   K --> J
-  J --> Done([Done])
+  J --> Done((Done))
 ```
 
 ## publish-crate.yml (Manual crates.io fallback)
