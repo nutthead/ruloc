@@ -81,5 +81,10 @@ Single-file binary crate (all code in `src/main.rs`):
 - **Rule 1:** Run `cargo fmt` after every conversation that changes or adds news `.rs` files
 - **Rule 2:** Run `cargo clippy --all-targets --all-features -- -D warnings` after every conversation that changes or adds news `.rs` files
 - **Rule 3:** Ensure rustdocs comments are always in-sync with the code they comment
-- **Rule 4:** Whenever you add new code to the project, ensure it has complete and eloquent rustdoc comments
-- **Rule 5:** Ensure all rustdocs follow the same professional and eloquent style and tone
+- **Rule 4:** Whenever you add new code to the project, ensure you use Rust patterns that make its all execution paths easily testable
+- **Rule 5:** Whenever you add new code to the project, ensure it has complete and eloquent rustdoc comments
+- **Rule 6:** Whenever you add new code to the project, ensure it has adequare unit test coverage
+- **Rule 7:** Ensure all rustdocs follow the same professional and eloquent style and tone
+- **Rule 8:** When you add a dependency to `Cargo.toml`, ensure you are adding the latest stable version of the dependency
+- **Rule 9:** Ensure code coverage always remains above 85%
+
