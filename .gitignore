@@ -4,3 +4,7 @@
 # IDE
 .idea/
 .claude/
+
+# Coverage reports
+tarpaulin-report.json
+target/tarpaulin/
