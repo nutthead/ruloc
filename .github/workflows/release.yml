@@ -421,7 +421,7 @@ jobs:
 
           To verify signatures:
           ```bash
-          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
+          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*"
           cosign verify-blob \
             --certificate ruloc-${VERSION}-<platform>.tar.gz.crt \
             --signature ruloc-${VERSION}-<platform>.tar.gz.sig \
@@ -531,7 +531,7 @@ jobs:
           curl -L -o test-artifact.tar.gz.sig "${BASE_URL}/${ARTIFACT}.sig"
           curl -L -o test-artifact.tar.gz.crt "${BASE_URL}/${ARTIFACT}.crt"
 
-          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/master"
+          WORKFLOW_ID="https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*"
           cosign verify-blob \
             --certificate test-artifact.tar.gz.crt \
             --signature test-artifact.tar.gz.sig \
