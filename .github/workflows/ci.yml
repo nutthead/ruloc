@@ -129,7 +129,7 @@ jobs:
         with:
           name: security-audit
           path: audit.json
-          retention-days: 30
+          retention-days: 90  # Long-term retention for compliance/security artifacts
 
   # Unit tests run across multiple platforms
   unit-tests:

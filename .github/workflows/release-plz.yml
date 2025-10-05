@@ -55,8 +55,10 @@ jobs:
           fi
 
           if git diff HEAD~1 HEAD --name-only | grep -q "^Cargo.toml$"; then
+            # Previous version: use grep on git show output (historical file)
             PREV_VERSION=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
-            CURR_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+            # Current version: use cargo metadata for robust parsing
+            CURR_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
 
             if [[ "$PREV_VERSION" != "$CURR_VERSION" ]]; then
               echo "Version changed from $PREV_VERSION to $CURR_VERSION"

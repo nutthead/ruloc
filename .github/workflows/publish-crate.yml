@@ -115,7 +115,8 @@ jobs:
       - name: Verify Cargo.toml version matches
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          # Use cargo metadata for robust version parsing
+          CARGO_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
 
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "❌ Version mismatch!"
