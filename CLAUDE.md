@@ -87,4 +87,5 @@ Single-file binary crate (all code in `src/main.rs`):
 - **Rule 7:** Ensure all rustdocs follow the same professional and eloquent style and tone
 - **Rule 8:** When you add a dependency to `Cargo.toml`, ensure you are adding the latest stable version of the dependency
 - **Rule 9:** Ensure code coverage always remains above 85%
+- **Rule 10:** Handover commit tasks to the `/c` SlashCommand
 
