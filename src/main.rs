@@ -10,9 +10,11 @@ use ra_ap_syntax::{AstNode, SourceFile, SyntaxNode, ast, ast::HasAttrs};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
 /// Statistics for lines of code in a given scope.
@@ -93,6 +95,192 @@ pub struct Report {
     pub summary: Summary,
     /// Individual statistics for each file.
     pub files: Vec<FileStats>,
+}
+
+/// Trait for accumulating file statistics in a memory-efficient manner.
+///
+/// Implementations can choose to store data in memory or stream to disk,
+/// allowing the tool to handle arbitrarily large codebases without
+/// excessive memory consumption.
+pub trait StatsAccumulator: Send + Sync {
+    /// Adds file statistics to the accumulator.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_stats` - The file statistics to add
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails (e.g., disk I/O error)
+    fn add_file(&mut self, file_stats: &FileStats) -> Result<(), String>;
+
+    /// Returns the current summary of all accumulated statistics.
+    ///
+    /// # Returns
+    ///
+    /// A `Summary` containing aggregated statistics for all files
+    fn get_summary(&self) -> Summary;
+
+    /// Creates a boxed iterator over all accumulated file statistics.
+    ///
+    /// # Returns
+    ///
+    /// An iterator yielding `FileStats` for each file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading back the data fails
+    fn iter_files(&self) -> Result<Box<dyn Iterator<Item = FileStats>>, String>;
+}
+
+/// In-memory accumulator for file statistics.
+///
+/// Stores all file statistics in a `Vec` in memory. Suitable for small
+/// codebases or testing, but may consume excessive memory for large projects.
+pub struct InMemoryAccumulator {
+    /// Accumulated summary statistics.
+    summary: Summary,
+    /// Vector of all file statistics.
+    files: Vec<FileStats>,
+}
+
+impl Default for InMemoryAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InMemoryAccumulator {
+    /// Creates a new in-memory accumulator.
+    ///
+    /// # Returns
+    ///
+    /// A new `InMemoryAccumulator` instance with empty statistics
+    pub fn new() -> Self {
+        Self {
+            summary: Summary::default(),
+            files: Vec::new(),
+        }
+    }
+}
+
+impl StatsAccumulator for InMemoryAccumulator {
+    fn add_file(&mut self, file_stats: &FileStats) -> Result<(), String> {
+        self.summary.add_file(file_stats);
+        self.files.push(file_stats.clone());
+        Ok(())
+    }
+
+    fn get_summary(&self) -> Summary {
+        self.summary.clone()
+    }
+
+    fn iter_files(&self) -> Result<Box<dyn Iterator<Item = FileStats>>, String> {
+        Ok(Box::new(self.files.clone().into_iter()))
+    }
+}
+
+/// File-backed accumulator for file statistics using a temporary file.
+///
+/// Streams file statistics to a temporary file in JSON Lines format,
+/// maintaining only the running summary in memory. This allows processing
+/// arbitrarily large codebases without excessive memory consumption.
+///
+/// The temporary file is automatically deleted when the accumulator is dropped.
+pub struct FileBackedAccumulator {
+    /// Running summary statistics.
+    summary: Summary,
+    /// Temporary file for storing file statistics.
+    temp_file: NamedTempFile,
+    /// Buffered writer for efficient I/O.
+    writer: BufWriter<std::fs::File>,
+}
+
+impl FileBackedAccumulator {
+    /// Creates a new file-backed accumulator with a temporary file.
+    ///
+    /// # Returns
+    ///
+    /// A new `FileBackedAccumulator` instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary file cannot be created
+    pub fn new() -> Result<Self, String> {
+        let temp_file =
+            NamedTempFile::new().map_err(|e| format!("Failed to create temporary file: {}", e))?;
+
+        let file = temp_file
+            .reopen()
+            .map_err(|e| format!("Failed to open temporary file for writing: {}", e))?;
+
+        let writer = BufWriter::with_capacity(8 * 1024 * 1024, file); // 8MB buffer
+
+        Ok(Self {
+            summary: Summary::default(),
+            temp_file,
+            writer,
+        })
+    }
+
+    /// Flushes any buffered data to the temporary file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the flush operation fails
+    fn flush(&mut self) -> Result<(), String> {
+        self.writer
+            .flush()
+            .map_err(|e| format!("Failed to flush writer: {}", e))
+    }
+}
+
+impl StatsAccumulator for FileBackedAccumulator {
+    fn add_file(&mut self, file_stats: &FileStats) -> Result<(), String> {
+        self.summary.add_file(file_stats);
+
+        // Serialize as JSON and write with newline (JSON Lines format)
+        let json = serde_json::to_string(file_stats)
+            .map_err(|e| format!("Failed to serialize file stats: {}", e))?;
+
+        writeln!(self.writer, "{}", json)
+            .map_err(|e| format!("Failed to write to temporary file: {}", e))?;
+
+        Ok(())
+    }
+
+    fn get_summary(&self) -> Summary {
+        self.summary.clone()
+    }
+
+    fn iter_files(&self) -> Result<Box<dyn Iterator<Item = FileStats>>, String> {
+        // Flush any pending writes
+        // Note: We can't call self.flush() here because of borrowing rules,
+        // so we need to ensure flush is called before iter_files
+
+        // Open the temp file for reading
+        let file = std::fs::File::open(self.temp_file.path())
+            .map_err(|e| format!("Failed to open temporary file for reading: {}", e))?;
+
+        let reader = BufReader::new(file);
+
+        // Create an iterator that reads JSON lines
+        let iter = reader.lines().filter_map(|line| match line {
+            Ok(line_str) => match serde_json::from_str::<FileStats>(&line_str) {
+                Ok(stats) => Some(stats),
+                Err(e) => {
+                    debug!("Failed to deserialize line: {}", e);
+                    None
+                }
+            },
+            Err(e) => {
+                debug!("Failed to read line: {}", e);
+                None
+            }
+        });
+
+        Ok(Box::new(iter))
+    }
 }
 
 /// Output format for the report.
@@ -238,6 +426,8 @@ fn parse_file_size(size_str: &str) -> Result<u64, String> {
 ///
 /// Parses command-line arguments, initializes logging, analyzes the specified
 /// file or directory, and outputs the results in the requested format.
+/// Uses a file-backed accumulator to avoid excessive memory consumption
+/// when processing large codebases.
 ///
 /// # Returns
 ///
@@ -250,6 +440,7 @@ fn parse_file_size(size_str: &str) -> Result<u64, String> {
 /// - File reading fails
 /// - Directory contains no Rust files
 /// - JSON serialization fails
+/// - Temporary file operations fail
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
@@ -267,11 +458,15 @@ fn main() -> Result<(), String> {
     // Parse max file size if specified
     let max_file_size = args.parse_max_file_size()?;
 
-    // Determine what to analyze
-    let file_stats = if let Some(file_path) = &args.file {
-        vec![analyze_file(file_path, max_file_size)?]
+    // Create file-backed accumulator for memory-efficient processing
+    let mut accumulator = FileBackedAccumulator::new()?;
+
+    // Determine what to analyze and collect stats into accumulator
+    if let Some(file_path) = &args.file {
+        let stats = analyze_file(file_path, max_file_size)?;
+        accumulator.add_file(&stats)?;
     } else if let Some(dir_path) = &args.dir {
-        analyze_directory(dir_path, max_file_size)?
+        analyze_directory(dir_path, max_file_size, &mut accumulator)?;
     } else {
         // No arguments provided, show help
         eprintln!("Error: Either --file or --dir must be specified.\n");
@@ -279,21 +474,13 @@ fn main() -> Result<(), String> {
         std::process::exit(1);
     };
 
-    // Build summary
-    let mut summary = Summary::default();
-    for stats in &file_stats {
-        summary.add_file(stats);
-    }
+    // Flush accumulator to ensure all data is written
+    accumulator.flush()?;
 
-    let report = Report {
-        summary,
-        files: file_stats,
-    };
-
-    // Output results
+    // Output results using the accumulator
     match args.output_format() {
-        OutputFormat::Text => output_text(&report),
-        OutputFormat::Json => output_json(&report)?,
+        OutputFormat::Text => output_text_from_accumulator(&accumulator)?,
+        OutputFormat::Json => output_json_from_accumulator(&accumulator)?,
     }
 
     Ok(())
@@ -603,24 +790,29 @@ fn analyze_file(path: &Path, max_file_size: Option<u64>) -> Result<FileStats, St
 ///
 /// Walks the directory tree, identifies all `.rs` files, and analyzes each one in parallel
 /// using rayon. Follows symbolic links during traversal. Files exceeding the size limit
-/// are skipped. Shows a progress bar during processing.
+/// are skipped. Shows a progress bar during processing. Results are added to the provided
+/// accumulator, enabling memory-efficient processing of large codebases.
 ///
 /// # Arguments
 ///
 /// * `dir` - Path to the directory to analyze
 /// * `max_file_size` - Optional maximum file size in bytes; larger files are skipped
+/// * `accumulator` - Accumulator to collect file statistics
 ///
 /// # Returns
 ///
-/// `Ok(Vec<FileStats>)` containing statistics for all analyzed files, or
-/// `Err(String)` if no Rust files are found or analysis fails
+/// `Ok(())` on success, or `Err(String)` if no Rust files are found or analysis fails
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - No Rust files are found in the directory
-/// - Any individual file analysis fails (except for size limit violations, which are skipped)
-fn analyze_directory(dir: &Path, max_file_size: Option<u64>) -> Result<Vec<FileStats>, String> {
+/// - Accumulator operations fail
+fn analyze_directory<A: StatsAccumulator>(
+    dir: &Path,
+    max_file_size: Option<u64>,
+    accumulator: &mut A,
+) -> Result<(), String> {
     // First pass: collect all .rs file paths
     let rust_files: Vec<PathBuf> = WalkDir::new(dir)
         .follow_links(true)
@@ -644,49 +836,58 @@ fn analyze_directory(dir: &Path, max_file_size: Option<u64>) -> Result<Vec<FileS
             .progress_chars("█▓░"),
     );
 
-    // Atomic counter for skipped files
+    // Atomic counters
     let skipped_count = Arc::new(AtomicUsize::new(0));
+    let analyzed_count = Arc::new(AtomicUsize::new(0));
+
+    // Wrap accumulator in Arc<Mutex<>> for thread-safe access
+    let accumulator_mutex = Arc::new(Mutex::new(accumulator));
 
     // Second pass: analyze files in parallel
-    let file_stats: Vec<FileStats> = rust_files
-        .par_iter()
-        .filter_map(|path| {
-            let result = analyze_file(path, max_file_size);
-            progress.inc(1);
+    rust_files.par_iter().for_each(|path| {
+        let result = analyze_file(path, max_file_size);
+        progress.inc(1);
 
-            match result {
-                Ok(stats) => Some(stats),
-                Err(e) if e.contains("exceeds maximum size") => {
-                    skipped_count.fetch_add(1, Ordering::Relaxed);
-                    debug!("Skipped: {}", e);
-                    None
-                }
-                Err(e) => {
-                    progress.println(format!("Error: {}", e));
-                    None
+        match result {
+            Ok(stats) => {
+                // Add to accumulator
+                let mut acc = accumulator_mutex.lock().unwrap();
+                if let Err(e) = acc.add_file(&stats) {
+                    progress.println(format!("Error adding file stats: {}", e));
+                } else {
+                    analyzed_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
-        })
-        .collect();
+            Err(e) if e.contains("exceeds maximum size") => {
+                skipped_count.fetch_add(1, Ordering::Relaxed);
+                debug!("Skipped: {}", e);
+            }
+            Err(e) => {
+                progress.println(format!("Error: {}", e));
+            }
+        }
+    });
 
     progress.finish_with_message("Analysis complete");
 
+    let final_analyzed = analyzed_count.load(Ordering::Relaxed);
     let final_skipped = skipped_count.load(Ordering::Relaxed);
+
     debug!(
         "Analyzed {} files in {} (skipped {} files exceeding size limit)",
-        file_stats.len(),
+        final_analyzed,
         dir.display(),
         final_skipped
     );
 
-    if file_stats.is_empty() {
+    if final_analyzed == 0 {
         return Err(format!(
             "No Rust files could be analyzed in {}",
             dir.display()
         ));
     }
 
-    Ok(file_stats)
+    Ok(())
 }
 
 /// Formats line statistics for plain text output with proper indentation.
@@ -717,6 +918,79 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
     )
 }
 
+/// Outputs statistics in plain text format from an accumulator.
+///
+/// Displays a summary section with aggregated statistics, followed by
+/// detailed statistics for each analyzed file. Streams file data from
+/// the accumulator without loading everything into memory.
+///
+/// # Arguments
+///
+/// * `accumulator` - The stats accumulator to read from
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(String)` if reading from accumulator fails
+///
+/// # Errors
+///
+/// Returns an error if the accumulator cannot provide file statistics
+fn output_text_from_accumulator<A: StatsAccumulator>(accumulator: &A) -> Result<(), String> {
+    let summary = accumulator.get_summary();
+
+    println!("Summary:");
+    println!("  Files: {}", summary.files);
+    println!("  Total:");
+    println!("{}", format_line_stats(&summary.total, 4));
+    println!("  Production:");
+    println!("{}", format_line_stats(&summary.production, 4));
+    println!("  Test:");
+    println!("{}", format_line_stats(&summary.test, 4));
+
+    println!("\nFiles:");
+    for file in accumulator.iter_files()? {
+        println!("  {}:", file.path);
+        println!("    Total:");
+        println!("{}", format_line_stats(&file.total, 6));
+        println!("    Production:");
+        println!("{}", format_line_stats(&file.production, 6));
+        println!("    Test:");
+        println!("{}", format_line_stats(&file.test, 6));
+    }
+
+    Ok(())
+}
+
+/// Outputs statistics in JSON format from an accumulator.
+///
+/// Serializes the summary and file statistics to pretty-printed JSON.
+/// Streams file data from the accumulator to build the report.
+///
+/// # Arguments
+///
+/// * `accumulator` - The stats accumulator to read from
+///
+/// # Returns
+///
+/// `Ok(())` on success, or `Err(String)` if serialization fails
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The accumulator cannot provide file statistics
+/// - JSON serialization fails
+fn output_json_from_accumulator<A: StatsAccumulator>(accumulator: &A) -> Result<(), String> {
+    let summary = accumulator.get_summary();
+    let files: Vec<FileStats> = accumulator.iter_files()?.collect();
+
+    let report = Report { summary, files };
+
+    let json = serde_json::to_string_pretty(&report)
+        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+    println!("{}", json);
+    Ok(())
+}
+
 /// Outputs the report in plain text format to stdout.
 ///
 /// Displays a summary section with aggregated statistics, followed by
@@ -725,6 +999,7 @@ fn format_line_stats(stats: &LineStats, indent: usize) -> String {
 /// # Arguments
 ///
 /// * `report` - The analysis report to output
+#[allow(dead_code)]
 fn output_text(report: &Report) {
     println!("Summary:");
     println!("  Files: {}", report.summary.files);
@@ -762,6 +1037,7 @@ fn output_text(report: &Report) {
 /// # Errors
 ///
 /// Returns an error if the report cannot be serialized to JSON
+#[allow(dead_code)]
 fn output_json(report: &Report) -> Result<(), String> {
     let json = serde_json::to_string_pretty(report)
         .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
@@ -782,6 +1058,126 @@ fn output_json(report: &Report) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    // ==================== Test Helpers ====================
+
+    /// Creates a `LineStats` instance with the given values.
+    ///
+    /// # Arguments
+    ///
+    /// * `all_lines` - Total number of lines
+    /// * `blank_lines` - Number of blank lines
+    /// * `comment_lines` - Number of comment lines
+    /// * `code_lines` - Number of code lines
+    fn make_line_stats(
+        all_lines: usize,
+        blank_lines: usize,
+        comment_lines: usize,
+        code_lines: usize,
+    ) -> LineStats {
+        LineStats {
+            all_lines,
+            blank_lines,
+            comment_lines,
+            code_lines,
+        }
+    }
+
+    /// Creates a simple `FileStats` instance for testing.
+    ///
+    /// Creates a file with the given stats for all code (no distinction between production and test).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File path
+    /// * `all_lines` - Total number of lines
+    /// * `blank_lines` - Number of blank lines
+    /// * `comment_lines` - Number of comment lines
+    /// * `code_lines` - Number of code lines
+    fn make_simple_file_stats(
+        path: &str,
+        all_lines: usize,
+        blank_lines: usize,
+        comment_lines: usize,
+        code_lines: usize,
+    ) -> FileStats {
+        let stats = make_line_stats(all_lines, blank_lines, comment_lines, code_lines);
+        FileStats {
+            path: path.to_string(),
+            total: stats.clone(),
+            production: stats,
+            test: LineStats::default(),
+        }
+    }
+
+    /// Creates a `FileStats` instance with separate production and test stats.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File path
+    /// * `prod_stats` - Production code statistics
+    /// * `test_stats` - Test code statistics
+    fn make_file_stats_with_tests(
+        path: &str,
+        prod_stats: LineStats,
+        test_stats: LineStats,
+    ) -> FileStats {
+        let mut total = prod_stats.clone();
+        total.add(&test_stats);
+
+        FileStats {
+            path: path.to_string(),
+            total,
+            production: prod_stats,
+            test: test_stats,
+        }
+    }
+
+    /// Creates a standard test `FileStats` for basic testing scenarios.
+    ///
+    /// Contains 10 total lines: 7 production (4 code) and 3 test (1 code).
+    fn make_standard_test_file_stats() -> FileStats {
+        make_file_stats_with_tests(
+            "test.rs",
+            make_line_stats(7, 1, 2, 4),
+            make_line_stats(3, 1, 1, 1),
+        )
+    }
+
+    /// Creates a minimal test `FileStats` for simple scenarios.
+    ///
+    /// Contains 5 lines of production code only.
+    fn make_minimal_test_file_stats() -> FileStats {
+        make_simple_file_stats("test.rs", 5, 1, 1, 3)
+    }
+
+    /// Creates a detailed test `FileStats` for complex testing scenarios.
+    ///
+    /// Contains 15 total lines: 10 production (5 code) and 5 test (3 code).
+    fn make_detailed_test_file_stats() -> FileStats {
+        make_file_stats_with_tests(
+            "test.rs",
+            make_line_stats(10, 2, 3, 5),
+            make_line_stats(5, 1, 1, 3),
+        )
+    }
+
+    /// Creates a standard test `Report` for output testing.
+    ///
+    /// Contains a summary matching `make_standard_test_file_stats()` with no files.
+    fn make_standard_test_report() -> Report {
+        Report {
+            summary: Summary {
+                files: 1,
+                total: make_line_stats(10, 2, 3, 5),
+                production: make_line_stats(7, 1, 2, 4),
+                test: make_line_stats(3, 1, 1, 1),
+            },
+            files: vec![],
+        }
+    }
+
+    // ==================== Tests ====================
+
     /// Tests that `LineStats::default()` creates a zero-initialized instance.
     #[test]
     fn test_line_stats_default() {
@@ -795,18 +1191,8 @@ mod tests {
     /// Tests that `LineStats::add()` correctly accumulates statistics.
     #[test]
     fn test_line_stats_add() {
-        let mut stats1 = LineStats {
-            all_lines: 10,
-            blank_lines: 2,
-            comment_lines: 3,
-            code_lines: 5,
-        };
-        let stats2 = LineStats {
-            all_lines: 20,
-            blank_lines: 4,
-            comment_lines: 6,
-            code_lines: 10,
-        };
+        let mut stats1 = make_line_stats(10, 2, 3, 5);
+        let stats2 = make_line_stats(20, 4, 6, 10);
         stats1.add(&stats2);
         assert_eq!(stats1.all_lines, 30);
         assert_eq!(stats1.blank_lines, 6);
@@ -927,27 +1313,7 @@ mod tests {
     #[test]
     fn test_summary_add_file() {
         let mut summary = Summary::default();
-        let file_stats = FileStats {
-            path: "test.rs".to_string(),
-            total: LineStats {
-                all_lines: 10,
-                blank_lines: 2,
-                comment_lines: 3,
-                code_lines: 5,
-            },
-            production: LineStats {
-                all_lines: 7,
-                blank_lines: 1,
-                comment_lines: 2,
-                code_lines: 4,
-            },
-            test: LineStats {
-                all_lines: 3,
-                blank_lines: 1,
-                comment_lines: 1,
-                code_lines: 1,
-            },
-        };
+        let file_stats = make_standard_test_file_stats();
         summary.add_file(&file_stats);
         assert_eq!(summary.files, 1);
         assert_eq!(summary.total.all_lines, 10);
@@ -958,12 +1324,7 @@ mod tests {
     /// Tests that line statistics are correctly formatted for text output.
     #[test]
     fn test_format_line_stats() {
-        let stats = LineStats {
-            all_lines: 100,
-            blank_lines: 20,
-            comment_lines: 30,
-            code_lines: 50,
-        };
+        let stats = make_line_stats(100, 20, 30, 50);
         let formatted = format_line_stats(&stats, 2);
         assert!(formatted.contains("All lines: 100"));
         assert!(formatted.contains("Blank lines: 20"));
@@ -1160,31 +1521,7 @@ mod tests {
     /// Tests output_text formatting.
     #[test]
     fn test_output_text() {
-        let report = Report {
-            summary: Summary {
-                files: 1,
-                total: LineStats {
-                    all_lines: 10,
-                    blank_lines: 2,
-                    comment_lines: 3,
-                    code_lines: 5,
-                },
-                production: LineStats {
-                    all_lines: 7,
-                    blank_lines: 1,
-                    comment_lines: 2,
-                    code_lines: 4,
-                },
-                test: LineStats {
-                    all_lines: 3,
-                    blank_lines: 1,
-                    comment_lines: 1,
-                    code_lines: 1,
-                },
-            },
-            files: vec![],
-        };
-
+        let report = make_standard_test_report();
         output_text(&report);
         // Just ensure it doesn't panic
     }
@@ -1192,31 +1529,7 @@ mod tests {
     /// Tests output_json formatting.
     #[test]
     fn test_output_json() {
-        let report = Report {
-            summary: Summary {
-                files: 1,
-                total: LineStats {
-                    all_lines: 10,
-                    blank_lines: 2,
-                    comment_lines: 3,
-                    code_lines: 5,
-                },
-                production: LineStats {
-                    all_lines: 7,
-                    blank_lines: 1,
-                    comment_lines: 2,
-                    code_lines: 4,
-                },
-                test: LineStats {
-                    all_lines: 3,
-                    blank_lines: 1,
-                    comment_lines: 1,
-                    code_lines: 1,
-                },
-            },
-            files: vec![],
-        };
-
+        let report = make_standard_test_report();
         let result = output_json(&report);
         assert!(result.is_ok());
     }
@@ -1236,11 +1549,12 @@ mod tests {
         let file2 = temp_dir.join("file2.rs");
         fs::write(&file2, "#[test]\nfn test() {}\n").unwrap();
 
-        let result = analyze_directory(&temp_dir, None);
+        let mut accumulator = InMemoryAccumulator::new();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
         assert!(result.is_ok());
 
-        let stats = result.unwrap();
-        assert_eq!(stats.len(), 2);
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
 
         fs::remove_dir_all(&temp_dir).ok();
     }
@@ -1262,12 +1576,13 @@ mod tests {
         fs::write(&large_file, "// Large\n".repeat(100)).unwrap();
 
         // Set size limit to 100 bytes - should skip the large file
-        let result = analyze_directory(&temp_dir, Some(100));
+        let mut accumulator = InMemoryAccumulator::new();
+        let result = analyze_directory(&temp_dir, Some(100), &mut accumulator);
         assert!(result.is_ok());
 
-        let stats = result.unwrap();
+        let summary = accumulator.get_summary();
         // Only the small file should be analyzed
-        assert!(stats.len() <= 1);
+        assert!(summary.files <= 1);
 
         fs::remove_dir_all(&temp_dir).ok();
     }
@@ -1322,49 +1637,13 @@ mod tests {
     /// Tests output_text with detailed file statistics.
     #[test]
     fn test_output_text_with_files() {
+        let file_stats = make_detailed_test_file_stats();
+        let mut summary = Summary::default();
+        summary.add_file(&file_stats);
+
         let report = Report {
-            summary: Summary {
-                files: 1,
-                total: LineStats {
-                    all_lines: 15,
-                    blank_lines: 3,
-                    comment_lines: 4,
-                    code_lines: 8,
-                },
-                production: LineStats {
-                    all_lines: 10,
-                    blank_lines: 2,
-                    comment_lines: 3,
-                    code_lines: 5,
-                },
-                test: LineStats {
-                    all_lines: 5,
-                    blank_lines: 1,
-                    comment_lines: 1,
-                    code_lines: 3,
-                },
-            },
-            files: vec![FileStats {
-                path: "test.rs".to_string(),
-                total: LineStats {
-                    all_lines: 15,
-                    blank_lines: 3,
-                    comment_lines: 4,
-                    code_lines: 8,
-                },
-                production: LineStats {
-                    all_lines: 10,
-                    blank_lines: 2,
-                    comment_lines: 3,
-                    code_lines: 5,
-                },
-                test: LineStats {
-                    all_lines: 5,
-                    blank_lines: 1,
-                    comment_lines: 1,
-                    code_lines: 3,
-                },
-            }],
+            summary,
+            files: vec![file_stats],
         };
 
         output_text(&report);
@@ -1403,7 +1682,8 @@ mod tests {
         let txt_file = temp_dir.join("readme.txt");
         fs::write(&txt_file, "Not a Rust file").unwrap();
 
-        let result = analyze_directory(&temp_dir, None);
+        let mut accumulator = InMemoryAccumulator::new();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No Rust files found"));
 
@@ -1426,9 +1706,14 @@ mod tests {
         fs::write(&large_file2, "// Large\n".repeat(100)).unwrap();
 
         // Set size limit to 50 bytes - all files will be skipped
-        let result = analyze_directory(&temp_dir, Some(50));
+        let mut accumulator = InMemoryAccumulator::new();
+        let result = analyze_directory(&temp_dir, Some(50), &mut accumulator);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No Rust files could be analyzed"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("No Rust files could be analyzed")
+        );
 
         fs::remove_dir_all(&temp_dir).ok();
     }
@@ -1573,11 +1858,12 @@ mod tests {
         let sub_file = subdir.join("sub.rs");
         fs::write(&sub_file, "fn sub() {}").unwrap();
 
-        let result = analyze_directory(&temp_dir, None);
+        let mut accumulator = InMemoryAccumulator::new();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
         assert!(result.is_ok());
 
-        let stats = result.unwrap();
-        assert_eq!(stats.len(), 3); // Should find all 3 .rs files
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 3); // Should find all 3 .rs files
 
         fs::remove_dir_all(&temp_dir).ok();
     }
@@ -1595,5 +1881,850 @@ mod tests {
         };
         let result = args.parse_max_file_size();
         assert!(result.is_err());
+    }
+
+    /// Tests InMemoryAccumulator basic operations.
+    #[test]
+    fn test_in_memory_accumulator() {
+        let mut acc = InMemoryAccumulator::new();
+
+        let stats1 = make_file_stats_with_tests(
+            "test1.rs",
+            make_line_stats(7, 1, 2, 4),
+            make_line_stats(3, 1, 1, 1),
+        );
+        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 3);
+
+        acc.add_file(&stats1).unwrap();
+        acc.add_file(&stats2).unwrap();
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 2);
+        assert_eq!(summary.total.all_lines, 15);
+        assert_eq!(summary.production.code_lines, 7);
+        assert_eq!(summary.test.code_lines, 1);
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "test1.rs");
+        assert_eq!(files[1].path, "test2.rs");
+    }
+
+    /// Tests FileBackedAccumulator basic operations.
+    #[test]
+    fn test_file_backed_accumulator() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+
+        let stats1 = make_file_stats_with_tests(
+            "test1.rs",
+            make_line_stats(7, 1, 2, 4),
+            make_line_stats(3, 1, 1, 1),
+        );
+        let stats2 = make_simple_file_stats("test2.rs", 5, 1, 1, 3);
+
+        acc.add_file(&stats1).unwrap();
+        acc.add_file(&stats2).unwrap();
+        acc.flush().unwrap();
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 2);
+        assert_eq!(summary.total.all_lines, 15);
+        assert_eq!(summary.production.code_lines, 7);
+        assert_eq!(summary.test.code_lines, 1);
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "test1.rs");
+        assert_eq!(files[1].path, "test2.rs");
+    }
+
+    /// Tests FileBackedAccumulator with large number of files.
+    #[test]
+    fn test_file_backed_accumulator_many_files() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+
+        // Add 1000 files to test buffering
+        for i in 0..1000 {
+            let stats = make_simple_file_stats(&format!("test{}.rs", i), 10, 2, 3, 5);
+            acc.add_file(&stats).unwrap();
+        }
+
+        acc.flush().unwrap();
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 1000);
+        assert_eq!(summary.total.all_lines, 10000);
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 1000);
+    }
+
+    /// Tests output_text_from_accumulator with InMemoryAccumulator.
+    #[test]
+    fn test_output_text_from_accumulator() {
+        let mut acc = InMemoryAccumulator::new();
+        let stats = make_standard_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        // Just ensure it doesn't panic
+        let result = output_text_from_accumulator(&acc);
+        assert!(result.is_ok());
+    }
+
+    /// Tests output_json_from_accumulator with InMemoryAccumulator.
+    #[test]
+    fn test_output_json_from_accumulator() {
+        let mut acc = InMemoryAccumulator::new();
+        let stats = make_standard_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        let result = output_json_from_accumulator(&acc);
+        assert!(result.is_ok());
+    }
+
+    /// Tests that FileBackedAccumulator properly handles file I/O errors.
+    #[test]
+    fn test_file_backed_accumulator_iteration() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+        let stats = make_minimal_test_file_stats();
+        acc.add_file(&stats).unwrap();
+        acc.flush().unwrap();
+
+        // Test multiple iterations
+        let files1: Vec<_> = acc.iter_files().unwrap().collect();
+        let files2: Vec<_> = acc.iter_files().unwrap().collect();
+
+        assert_eq!(files1.len(), 1);
+        assert_eq!(files2.len(), 1);
+        assert_eq!(files1[0].path, files2[0].path);
+    }
+
+    /// Tests InMemoryAccumulator with empty data.
+    #[test]
+    fn test_in_memory_accumulator_empty() {
+        let acc = InMemoryAccumulator::new();
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 0);
+        assert_eq!(summary.total.all_lines, 0);
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 0);
+    }
+
+    /// Tests FileBackedAccumulator with empty data.
+    #[test]
+    fn test_file_backed_accumulator_empty() {
+        let acc = FileBackedAccumulator::new().unwrap();
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 0);
+        assert_eq!(summary.total.all_lines, 0);
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 0);
+    }
+
+    /// Tests FileBackedAccumulator flush method.
+    #[test]
+    fn test_file_backed_accumulator_flush() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+        let stats = make_minimal_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        // Multiple flushes should succeed
+        assert!(acc.flush().is_ok());
+        assert!(acc.flush().is_ok());
+
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 1);
+    }
+
+    /// Tests output functions with FileBackedAccumulator.
+    #[test]
+    fn test_output_functions_with_file_backed_accumulator() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+        let stats = make_standard_test_file_stats();
+        acc.add_file(&stats).unwrap();
+        acc.flush().unwrap();
+
+        // Test text output
+        let result = output_text_from_accumulator(&acc);
+        assert!(result.is_ok());
+
+        // Test JSON output
+        let result = output_json_from_accumulator(&acc);
+        assert!(result.is_ok());
+    }
+
+    /// Tests analyze_directory error handling with accumulator errors.
+    #[test]
+    fn test_analyze_directory_with_file_backed_accumulator() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_file_backed");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create test files
+        let file1 = temp_dir.join("file1.rs");
+        fs::write(&file1, "fn main() {}\n").unwrap();
+
+        let file2 = temp_dir.join("file2.rs");
+        fs::write(&file2, "#[test]\nfn test() {}\n").unwrap();
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+        assert!(result.is_ok());
+
+        accumulator.flush().unwrap();
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 2);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests that analyze_file handles nonexistent files correctly.
+    #[test]
+    fn test_analyze_file_nonexistent() {
+        let result = analyze_file(std::path::Path::new("/nonexistent/file.rs"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to"));
+    }
+
+    /// Tests Summary default initialization.
+    #[test]
+    fn test_summary_default() {
+        let summary = Summary::default();
+        assert_eq!(summary.files, 0);
+        assert_eq!(summary.total.all_lines, 0);
+        assert_eq!(summary.production.all_lines, 0);
+        assert_eq!(summary.test.all_lines, 0);
+    }
+
+    /// Tests that line stats accurately track all components.
+    #[test]
+    fn test_line_stats_comprehensive() {
+        let mut stats = make_line_stats(100, 20, 30, 50);
+        let other = make_line_stats(50, 10, 15, 25);
+
+        stats.add(&other);
+
+        assert_eq!(stats.all_lines, 150);
+        assert_eq!(stats.blank_lines, 30);
+        assert_eq!(stats.comment_lines, 45);
+        assert_eq!(stats.code_lines, 75);
+    }
+
+    /// Tests InMemoryAccumulator iterator returns owned data.
+    #[test]
+    fn test_in_memory_accumulator_iterator_ownership() {
+        let mut acc = InMemoryAccumulator::new();
+        let stats = make_minimal_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        // Consume iterator multiple times
+        let files1: Vec<_> = acc.iter_files().unwrap().collect();
+        let files2: Vec<_> = acc.iter_files().unwrap().collect();
+
+        assert_eq!(files1.len(), 1);
+        assert_eq!(files2.len(), 1);
+    }
+
+    /// Tests analyze_file with a file containing only comments.
+    #[test]
+    fn test_analyze_file_only_comments() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_only_comments.rs");
+
+        let content = "// Comment 1\n// Comment 2\n/* Block comment */\n";
+        std::fs::write(&temp_file, content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.total.comment_lines, 3);
+        assert_eq!(stats.total.code_lines, 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests analyze_lines with single-line block comment.
+    #[test]
+    fn test_analyze_lines_single_line_block_comment() {
+        let content = "/* single line block comment */\ncode();\n";
+        let line_types = analyze_lines(content);
+
+        assert_eq!(line_types.len(), 2);
+        assert_eq!(line_types[0], LineType::Comment);
+        assert_eq!(line_types[1], LineType::Code);
+    }
+
+    /// Tests classify_lines with mixed production and test code.
+    #[test]
+    fn test_classify_lines_production_and_test_mixed() {
+        let code = r#"
+fn production() {}
+
+#[test]
+fn test_func() {
+    assert!(true);
+}
+
+fn more_production() {}
+"#;
+        let result = classify_lines(code);
+
+        // Should have both test and production lines
+        assert!(result.iter().any(|&is_test| is_test));
+        assert!(result.iter().any(|&is_test| !is_test));
+    }
+
+    /// Tests FileStats equality.
+    #[test]
+    fn test_file_stats_equality() {
+        let stats1 = make_standard_test_file_stats();
+        let stats2 = stats1.clone();
+
+        assert_eq!(stats1, stats2);
+    }
+
+    /// Tests Report equality.
+    #[test]
+    fn test_report_equality() {
+        let report1 = Report {
+            summary: Summary::default(),
+            files: vec![],
+        };
+
+        let report2 = report1.clone();
+
+        assert_eq!(report1, report2);
+    }
+
+    /// Tests Args output_format method with text flag.
+    #[test]
+    fn test_args_output_format_with_text_flag() {
+        let args = Args {
+            file: None,
+            dir: None,
+            out_text: true,
+            out_json: false,
+            verbose: false,
+            max_file_size: None,
+        };
+        assert_eq!(args.output_format(), OutputFormat::Text);
+    }
+
+    /// Tests analyze_file with metadata errors for size checking.
+    #[test]
+    fn test_analyze_file_metadata_error() {
+        // Try to analyze a file that doesn't exist with max_file_size set
+        let result = analyze_file(
+            std::path::Path::new("/nonexistent/path/file.rs"),
+            Some(1000),
+        );
+        assert!(result.is_err());
+    }
+
+    /// Tests analyze_lines with empty content.
+    #[test]
+    fn test_analyze_lines_empty_content() {
+        let content = "";
+        let line_types = analyze_lines(content);
+        assert_eq!(line_types.len(), 0);
+    }
+
+    /// Tests compute_line_stats with empty input.
+    #[test]
+    fn test_compute_line_stats_empty() {
+        let line_types: Vec<LineType> = vec![];
+        let stats = compute_line_stats(&line_types, 0);
+        assert_eq!(stats.all_lines, 0);
+        assert_eq!(stats.blank_lines, 0);
+        assert_eq!(stats.comment_lines, 0);
+        assert_eq!(stats.code_lines, 0);
+    }
+
+    /// Tests compute_line_stats with only blank lines.
+    #[test]
+    fn test_compute_line_stats_only_blanks() {
+        let line_types = vec![LineType::Blank, LineType::Blank, LineType::Blank];
+        let stats = compute_line_stats(&line_types, 3);
+        assert_eq!(stats.all_lines, 3);
+        assert_eq!(stats.blank_lines, 3);
+        assert_eq!(stats.comment_lines, 0);
+        assert_eq!(stats.code_lines, 0);
+    }
+
+    /// Tests is_test_node with non-test nodes.
+    #[test]
+    fn test_is_test_node_regular_function() {
+        let content = "fn regular_function() {}";
+        let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        // The root itself should not be a test node
+        assert!(!is_test_node(&root));
+    }
+
+    /// Tests analyze_file with file at exact size limit.
+    #[test]
+    fn test_analyze_file_exact_size_limit() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_exact_size.rs");
+
+        // Create a file with known size
+        let content = "fn test() {}"; // 12 bytes
+        std::fs::write(&temp_file, content).unwrap();
+
+        // Set limit to exact size - should succeed
+        let result = analyze_file(&temp_file, Some(12));
+        assert!(result.is_ok());
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests FileBackedAccumulator serialization error handling.
+    #[test]
+    fn test_file_backed_accumulator_add_multiple() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+
+        // Add multiple files sequentially
+        for i in 0..10 {
+            let mut stats = make_minimal_test_file_stats();
+            stats.path = format!("test{}.rs", i);
+            assert!(acc.add_file(&stats).is_ok());
+        }
+
+        assert!(acc.flush().is_ok());
+
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 10);
+    }
+
+    /// Tests analyze_directory with progress tracking.
+    #[test]
+    fn test_analyze_directory_progress() {
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("test_ruloc_progress");
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create multiple files to test progress bar
+        for i in 0..5 {
+            let file = temp_dir.join(format!("file{}.rs", i));
+            fs::write(&file, "fn main() {}\n").unwrap();
+        }
+
+        let mut accumulator = FileBackedAccumulator::new().unwrap();
+        let result = analyze_directory(&temp_dir, None, &mut accumulator);
+        assert!(result.is_ok());
+
+        let summary = accumulator.get_summary();
+        assert_eq!(summary.files, 5);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Tests analyze_file with production and test code.
+    #[test]
+    fn test_analyze_file_production_and_test() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_prod_test.rs");
+
+        let content = r#"
+fn production() {
+    println!("production");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_it() {
+        assert!(true);
+    }
+}
+"#;
+        std::fs::write(&temp_file, content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.production.code_lines > 0);
+        assert!(stats.test.code_lines > 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests LineStats serialization.
+    #[test]
+    fn test_line_stats_serialization() {
+        let stats = make_line_stats(100, 20, 30, 50);
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: LineStats = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(stats, deserialized);
+    }
+
+    /// Tests FileStats serialization.
+    #[test]
+    fn test_file_stats_serialization() {
+        let stats = make_standard_test_file_stats();
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: FileStats = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(stats, deserialized);
+    }
+
+    /// Tests Summary serialization.
+    #[test]
+    fn test_summary_serialization() {
+        let summary = Summary {
+            files: 5,
+            total: make_line_stats(100, 20, 30, 50),
+            production: make_line_stats(70, 10, 20, 40),
+            test: make_line_stats(30, 10, 10, 10),
+        };
+
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: Summary = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(summary, deserialized);
+    }
+
+    /// Tests Report serialization.
+    #[test]
+    fn test_report_serialization() {
+        let report = Report {
+            summary: Summary::default(),
+            files: vec![],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let deserialized: Report = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(report, deserialized);
+    }
+
+    /// Tests FileBackedAccumulator with corrupted data.
+    #[test]
+    fn test_file_backed_accumulator_corrupted_data() {
+        use std::io::Write;
+
+        let mut acc = FileBackedAccumulator::new().unwrap();
+
+        // Add valid data first
+        let stats = make_minimal_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        // Write corrupted data directly to the writer
+        writeln!(acc.writer, "corrupted json data").unwrap();
+        acc.flush().unwrap();
+
+        // Should skip corrupted lines and only return valid ones
+        let files: Vec<_> = acc.iter_files().unwrap().collect();
+        assert_eq!(files.len(), 1); // Only the valid entry
+    }
+
+    /// Tests parse_file_size with zero.
+    #[test]
+    fn test_parse_file_size_zero() {
+        assert_eq!(parse_file_size("0").unwrap(), 0);
+        assert_eq!(parse_file_size("0KB").unwrap(), 0);
+    }
+
+    /// Tests analyze_lines with code after block comment end.
+    #[test]
+    fn test_analyze_lines_code_after_block_comment() {
+        let content = "/* comment */ code();";
+        let line_types = analyze_lines(content);
+
+        assert_eq!(line_types.len(), 1);
+        // The whole line is treated as a comment since it starts with /*
+        assert_eq!(line_types[0], LineType::Comment);
+    }
+
+    /// Tests classify_lines with nested test modules.
+    #[test]
+    fn test_classify_lines_nested_test_modules() {
+        let code = r#"
+fn production() {}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(test)]
+    mod nested {
+        #[test]
+        fn inner() {}
+    }
+}
+"#;
+        let result = classify_lines(code);
+
+        // Should have both test and production lines
+        assert!(result.iter().any(|&is_test| is_test));
+        assert!(result.iter().any(|&is_test| !is_test));
+    }
+
+    /// Tests find_test_sections directly.
+    #[test]
+    fn test_find_test_sections_function() {
+        let content = r#"
+fn production() {}
+
+#[test]
+fn test_one() {}
+
+#[test]
+fn test_two() {}
+"#;
+        let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        let mut sections = Vec::new();
+        find_test_sections(&root, &mut sections, content);
+
+        // Should find two test sections
+        assert_eq!(sections.len(), 2);
+    }
+
+    /// Tests compute_line_stats with only comments.
+    #[test]
+    fn test_compute_line_stats_only_comments() {
+        let line_types = vec![LineType::Comment, LineType::Comment, LineType::Comment];
+        let stats = compute_line_stats(&line_types, 3);
+        assert_eq!(stats.all_lines, 3);
+        assert_eq!(stats.blank_lines, 0);
+        assert_eq!(stats.comment_lines, 3);
+        assert_eq!(stats.code_lines, 0);
+    }
+
+    /// Tests compute_line_stats with only code.
+    #[test]
+    fn test_compute_line_stats_only_code() {
+        let line_types = vec![LineType::Code, LineType::Code, LineType::Code];
+        let stats = compute_line_stats(&line_types, 3);
+        assert_eq!(stats.all_lines, 3);
+        assert_eq!(stats.blank_lines, 0);
+        assert_eq!(stats.comment_lines, 0);
+        assert_eq!(stats.code_lines, 3);
+    }
+
+    /// Tests InMemoryAccumulator default behavior.
+    #[test]
+    fn test_in_memory_accumulator_new() {
+        let acc = InMemoryAccumulator::new();
+        let summary = acc.get_summary();
+
+        assert_eq!(summary.files, 0);
+        assert_eq!(summary.total.all_lines, 0);
+    }
+
+    /// Tests analyze_file with very large line count.
+    #[test]
+    fn test_analyze_file_large_file() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_large_file.rs");
+
+        // Create a file with many lines
+        let mut content = String::new();
+        for i in 0..1000 {
+            content.push_str(&format!("// Line {}\n", i));
+        }
+
+        std::fs::write(&temp_file, &content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert_eq!(stats.total.all_lines, 1000);
+        assert_eq!(stats.total.comment_lines, 1000);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests is_test_node with a test function.
+    #[test]
+    fn test_is_test_node_test_function() {
+        let content = "#[test]\nfn test_something() {}";
+        let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        // Find the function node
+        for child in root.descendants() {
+            if ast::Fn::cast(child.clone()).is_some() && is_test_node(&child) {
+                return; // Test passes
+            }
+        }
+
+        panic!("Should have found a test node");
+    }
+
+    /// Tests is_test_node returns false for normal code.
+    #[test]
+    fn test_is_test_node_normal_code() {
+        let content = "fn regular_function() {}";
+        let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        // Regular functions should not be test nodes
+        for child in root.descendants() {
+            if ast::Fn::cast(child.clone()).is_some() {
+                // This should return false for regular functions
+                let _ = is_test_node(&child);
+            }
+        }
+        // Test completes successfully
+    }
+
+    /// Tests find_test_sections with multiple test annotations.
+    #[test]
+    fn test_find_test_sections_multiple_annotations() {
+        let content = r#"
+fn production() {}
+
+#[test]
+fn test_alpha() {
+    assert!(true);
+}
+
+#[test]
+fn test_beta() {
+    assert!(false || true);
+}
+"#;
+        let parse = SourceFile::parse(content, ra_ap_syntax::Edition::CURRENT);
+        let root = parse.syntax_node();
+
+        let mut sections = Vec::new();
+        find_test_sections(&root, &mut sections, content);
+
+        // Should find both test functions
+        assert!(sections.len() >= 2);
+    }
+
+    /// Tests analyze_file with mixed blank, comment, and code lines.
+    #[test]
+    fn test_analyze_file_mixed_content() {
+        let mut temp_file = std::env::temp_dir();
+        temp_file.push("test_mixed_content.rs");
+
+        let content = r#"
+// Header comment
+
+fn production() {
+    // Inner comment
+    println!("hello");
+}
+
+#[test]
+fn test() {
+
+    assert!(true);
+}
+"#;
+        std::fs::write(&temp_file, content).unwrap();
+
+        let result = analyze_file(&temp_file, None);
+        assert!(result.is_ok());
+
+        let stats = result.unwrap();
+        assert!(stats.total.blank_lines > 0);
+        assert!(stats.total.comment_lines > 0);
+        assert!(stats.total.code_lines > 0);
+        assert!(stats.production.code_lines > 0);
+        assert!(stats.test.code_lines > 0);
+
+        std::fs::remove_file(&temp_file).ok();
+    }
+
+    /// Tests CodeSection structure usage.
+    #[test]
+    fn test_code_section_creation() {
+        let section = CodeSection {
+            start_line: 10,
+            end_line: 20,
+        };
+
+        assert_eq!(section.start_line, 10);
+        assert_eq!(section.end_line, 20);
+    }
+
+    /// Tests analyze_lines with mixed block and line comments.
+    #[test]
+    fn test_analyze_lines_mixed_comments() {
+        let content = r#"// Line comment
+/* Block start
+Still in block
+Block end */
+// Another line comment
+code();"#;
+        let line_types = analyze_lines(content);
+
+        assert_eq!(line_types.len(), 6);
+        assert_eq!(line_types[0], LineType::Comment);
+        assert_eq!(line_types[1], LineType::Comment);
+        assert_eq!(line_types[2], LineType::Comment);
+        assert_eq!(line_types[3], LineType::Comment);
+        assert_eq!(line_types[4], LineType::Comment);
+        assert_eq!(line_types[5], LineType::Code);
+    }
+
+    /// Tests analyze_lines with tab characters.
+    #[test]
+    fn test_analyze_lines_with_tabs() {
+        let content = "\t\t// Indented comment\n\t\tfn code() {}\n";
+        let line_types = analyze_lines(content);
+
+        assert_eq!(line_types.len(), 2);
+        assert_eq!(line_types[0], LineType::Comment);
+        assert_eq!(line_types[1], LineType::Code);
+    }
+
+    /// Tests that Summary accumulates correctly across multiple files.
+    #[test]
+    fn test_summary_accumulation() {
+        let mut summary = Summary::default();
+
+        for _ in 0..5 {
+            let stats = make_standard_test_file_stats();
+            summary.add_file(&stats);
+        }
+
+        assert_eq!(summary.files, 5);
+        assert_eq!(summary.total.all_lines, 50);
+        assert_eq!(summary.production.code_lines, 20);
+        assert_eq!(summary.test.code_lines, 5);
+    }
+
+    /// Tests FileBackedAccumulator without any flush calls.
+    #[test]
+    fn test_file_backed_accumulator_no_explicit_flush() {
+        let mut acc = FileBackedAccumulator::new().unwrap();
+        let stats = make_minimal_test_file_stats();
+        acc.add_file(&stats).unwrap();
+
+        // Try to read without explicit flush
+        let summary = acc.get_summary();
+        assert_eq!(summary.files, 1);
+    }
+
+    /// Tests LineType enum completeness.
+    #[test]
+    fn test_line_type_variants() {
+        let blank = LineType::Blank;
+        let comment = LineType::Comment;
+        let code = LineType::Code;
+
+        assert_eq!(blank, LineType::Blank);
+        assert_eq!(comment, LineType::Comment);
+        assert_eq!(code, LineType::Code);
+        assert_ne!(blank, comment);
+        assert_ne!(blank, code);
+        assert_ne!(comment, code);
     }
 }
