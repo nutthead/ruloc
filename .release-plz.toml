@@ -12,8 +12,9 @@
 # - GitHub release creation
 
 [workspace]
-# Enable dependency updates in release PRs
-dependencies_update = true
+# Dependency update strategy: Manual updates preferred for reproducible builds
+# Set to false to align with --locked flags in CI/release workflows
+dependencies_update = false
 
 # Allow dirty working directory (useful for CI)
 allow_dirty = false
@@ -69,6 +70,7 @@ name = "ruloc"
 changelog_path = "CHANGELOG.md"
 publish = true
 release = true
+git_release_enable = true  # Explicitly enable GitHub release creation
 
 # ============================================================================
 # Changelog configuration powered by git-cliff
@@ -108,10 +110,8 @@ protect_breaking_commits = true
 tag_pattern = "^v\\d+\\.\\d+\\.\\d+$"
 sort_commits = "oldest"
 commit_preprocessors = [
-    # Remove issue numbers from commits
-    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)', replace = "" },
-    # Remove PR numbers from commits
-    { pattern = '\\s*\\(#[0-9]+\\)$', replace = "" },
+    # Remove issue numbers from middle of message, preserve PR references at end
+    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)(?!\\s*$)', replace = "" },
 ]
 commit_parsers = [
     # Skip rule: ONLY commits with $no-changelog tag are excluded from changelog
@@ -129,7 +129,6 @@ commit_parsers = [
     { body = ".*\\$ci", group = "👷 CI/CD" },
     { body = ".*\\$revert", group = "⏪ Reverts" },
     { body = ".*\\$chore", group = "🧹 Miscellaneous" },
-    { body = ".*\\$misc", group = "🧹 Miscellaneous" },
 
     # Special cases
     { body = ".*security", group = "🔐 Security" },
@@ -147,6 +146,7 @@ commit_parsers = [
     { message = "^revert", group = "⏪ Reverts" },
     { message = "^build", group = "📦 Build System" },
     { message = "^ci", group = "👷 CI/CD" },
+    { message = "^polish", group = "✨ Polish" },
 
     # Catch-all
     { message = ".*", group = "🧹 Miscellaneous" },
