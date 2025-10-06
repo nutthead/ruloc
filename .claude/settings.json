@@ -13,6 +13,7 @@
       "Bash(python3:*)",
       "Bash(rustup component:*)",
       "Bash(shellcheck:*)",
+      "Edit",
       "WebFetch(domain:claude.com)",
       "WebFetch(domain:docs.claude.com)",
       "WebFetch(domain:github.com)"
