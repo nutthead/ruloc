@@ -545,13 +545,18 @@ enum OutputFormat {
 /// Command-line arguments for ruloc.
 #[derive(Debug, Parser)]
 #[command(name = "ruloc", version, about = "Rust lines of code counter")]
+#[command(group(
+    clap::ArgGroup::new("input")
+        .required(true)
+        .args(&["file", "dir"])
+))]
 struct Args {
     /// Analyze a single Rust file.
-    #[arg(short, long, value_name = "FILE", conflicts_with = "dir")]
+    #[arg(short, long, value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Analyze all Rust files in a directory recursively.
-    #[arg(short, long, value_name = "DIR", conflicts_with = "file")]
+    #[arg(short, long, value_name = "DIR")]
     dir: Option<PathBuf>,
 
     /// Output in plain text format (default).
@@ -599,9 +604,7 @@ impl Args {
 
         parse_file_size(size_str).map(Some)
     }
-}
 
-impl Args {
     /// Determines the output format based on command-line flags.
     ///
     /// # Returns
@@ -746,34 +749,7 @@ fn main() -> Result<(), String> {
 
     // Handle debug mode separately
     if args.debug {
-        let use_color = !args.no_color;
-
-        if let Some(file_path) = &args.file {
-            output_file_debug(file_path, use_color, max_file_size)?;
-        } else if let Some(dir_path) = &args.dir {
-            // Collect all Rust files
-            let rust_files: Vec<_> = WalkDir::new(dir_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
-                .collect();
-
-            for entry in rust_files {
-                let path = entry.path();
-                // Skip files that exceed size limit
-                if let Err(e) = output_file_debug(path, use_color, max_file_size) {
-                    eprintln!("Warning: {}", e);
-                    continue;
-                }
-                println!(); // Blank line between files
-            }
-        } else {
-            eprintln!("Error: Either --file or --dir must be specified.\n");
-            eprintln!("Use --help for more information.");
-            std::process::exit(1);
-        }
-
-        return Ok(());
+        return handle_debug_mode(&args, max_file_size);
     }
 
     // Create file-backed accumulator for memory-efficient processing
@@ -785,12 +761,7 @@ fn main() -> Result<(), String> {
         accumulator.add_file(&stats)?;
     } else if let Some(dir_path) = &args.dir {
         analyze_directory(dir_path, max_file_size, &mut accumulator)?;
-    } else {
-        // No arguments provided, show help
-        eprintln!("Error: Either --file or --dir must be specified.\n");
-        eprintln!("Use --help for more information.");
-        std::process::exit(1);
-    };
+    }
 
     // Flush accumulator to ensure all data is written
     accumulator.flush()?;
@@ -1440,6 +1411,51 @@ fn output_file_debug(
             let formatted = format_debug_line(line, line_types[i], is_test_line[i], use_color);
             println!("{}", formatted);
         }
+    }
+
+    Ok(())
+}
+
+/// Handles debug mode output for files or directories using pattern matching.
+///
+/// Processes either a single file or all Rust files in a directory, outputting
+/// line-by-line debug information with type annotations. Uses pattern matching
+/// to exhaustively handle both cases.
+///
+/// # Arguments
+///
+/// * `args` - Command-line arguments containing file/dir paths and color settings
+/// * `max_file_size` - Optional maximum file size limit
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error message if analysis fails
+///
+/// # Errors
+///
+/// Returns an error if file reading or analysis fails
+fn handle_debug_mode(args: &Args, max_file_size: Option<u64>) -> Result<(), String> {
+    let use_color = !args.no_color;
+
+    match (&args.file, &args.dir) {
+        (Some(file_path), None) => {
+            output_file_debug(file_path, use_color, max_file_size)?;
+        }
+        (None, Some(dir_path)) => {
+            for entry in WalkDir::new(dir_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+                if let Err(e) = output_file_debug(path, use_color, max_file_size) {
+                    eprintln!("Warning: {}", e);
+                    continue;
+                }
+                println!();
+            }
+        }
+        _ => unreachable!("ArgGroup ensures exactly one of file or dir is Some"),
     }
 
     Ok(())
