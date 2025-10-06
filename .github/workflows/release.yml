@@ -456,7 +456,7 @@ jobs:
             fi
 
             echo "✓ Signed successfully"
-            ((SIGNED_COUNT++))
+            SIGNED_COUNT=$((SIGNED_COUNT + 1))
           done <<< "$ARCHIVES"
 
           echo ""
