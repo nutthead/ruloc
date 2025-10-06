@@ -110,8 +110,10 @@ protect_breaking_commits = true
 tag_pattern = "^v\\d+\\.\\d+\\.\\d+$"
 sort_commits = "oldest"
 commit_preprocessors = [
-    # Remove issue numbers from middle of message, preserve PR references at end
-    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)(?!\\s*$)', replace = "" },
+    # Remove issue numbers like (#123) or (fix #123) from commit messages
+    # NOTE: Cannot use negative lookahead (?!...) - not supported by release-plz regex engine
+    # This means PR references at the end may also be removed, which is acceptable
+    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)', replace = "" },
 ]
 commit_parsers = [
     # Skip rule: ONLY commits with $no-changelog tag are excluded from changelog
