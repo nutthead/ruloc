@@ -542,6 +542,19 @@ enum OutputFormat {
     Json,
 }
 
+/// Represents the input source for analysis (file or directory).
+///
+/// This enum encodes the invariant that exactly one input type is provided,
+/// which is enforced by clap's ArgGroup but represented as a proper type.
+#[derive(Debug, Clone)]
+enum InputSource {
+    /// Analyze a single Rust file.
+    File(PathBuf),
+
+    /// Analyze all Rust files in a directory recursively.
+    Directory(PathBuf),
+}
+
 /// Command-line arguments for ruloc.
 #[derive(Debug, Parser)]
 #[command(name = "ruloc", version, about = "Rust lines of code counter")]
@@ -586,6 +599,26 @@ struct Args {
 }
 
 impl Args {
+    /// Extracts the validated input source from command-line arguments.
+    ///
+    /// Converts the two `Option<PathBuf>` fields into a single `InputSource` enum,
+    /// encoding the ArgGroup invariant that exactly one is `Some` at the type level.
+    ///
+    /// # Returns
+    ///
+    /// `InputSource` enum representing either a file or directory path
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ArgGroup invariant is violated (should never happen with proper clap setup)
+    fn input_source(&self) -> InputSource {
+        match (&self.file, &self.dir) {
+            (Some(path), None) => InputSource::File(path.clone()),
+            (None, Some(path)) => InputSource::Directory(path.clone()),
+            _ => unreachable!("ArgGroup ensures exactly one of file or dir is Some"),
+        }
+    }
+
     /// Parses the max file size from the command-line argument.
     ///
     /// Supports units: KB, MB, GB. Without a unit, interprets as bytes.
@@ -733,15 +766,17 @@ fn parse_file_size(size_str: &str) -> Result<u64, String> {
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
-    // Initialize logger
-    if args.verbose {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Trace)
-            .init();
-    } else {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Warn)
-            .init();
+    match args.verbose {
+        true => {
+            env_logger::Builder::from_default_env()
+                .filter_level(log::LevelFilter::Trace)
+                .init();
+        }
+        false => {
+            env_logger::Builder::from_default_env()
+                .filter_level(log::LevelFilter::Warn)
+                .init();
+        }
     }
 
     // Parse max file size if specified
@@ -756,11 +791,14 @@ fn main() -> Result<(), String> {
     let mut accumulator = FileBackedAccumulator::new()?;
 
     // Determine what to analyze and collect stats into accumulator
-    if let Some(file_path) = &args.file {
-        let stats = analyze_file(file_path, max_file_size)?;
-        accumulator.add_file(&stats)?;
-    } else if let Some(dir_path) = &args.dir {
-        analyze_directory(dir_path, max_file_size, &mut accumulator)?;
+    match args.input_source() {
+        InputSource::File(file_path) => {
+            let stats = analyze_file(&file_path, max_file_size)?;
+            accumulator.add_file(&stats)?;
+        }
+        InputSource::Directory(dir_path) => {
+            analyze_directory(&dir_path, max_file_size, &mut accumulator)?;
+        }
     }
 
     // Flush accumulator to ensure all data is written
@@ -1416,11 +1454,11 @@ fn output_file_debug(
     Ok(())
 }
 
-/// Handles debug mode output for files or directories using pattern matching.
+/// Handles debug mode output for files or directories.
 ///
 /// Processes either a single file or all Rust files in a directory, outputting
-/// line-by-line debug information with type annotations. Uses pattern matching
-/// to exhaustively handle both cases.
+/// line-by-line debug information with type annotations. Uses exhaustive pattern
+/// matching on `InputSource` to handle both cases without needing a catch-all.
 ///
 /// # Arguments
 ///
@@ -1437,12 +1475,12 @@ fn output_file_debug(
 fn handle_debug_mode(args: &Args, max_file_size: Option<u64>) -> Result<(), String> {
     let use_color = !args.no_color;
 
-    match (&args.file, &args.dir) {
-        (Some(file_path), None) => {
-            output_file_debug(file_path, use_color, max_file_size)?;
+    match args.input_source() {
+        InputSource::File(file_path) => {
+            output_file_debug(&file_path, use_color, max_file_size)?;
         }
-        (None, Some(dir_path)) => {
-            for entry in WalkDir::new(dir_path)
+        InputSource::Directory(dir_path) => {
+            for entry in WalkDir::new(&dir_path)
                 .into_iter()
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
@@ -1455,7 +1493,6 @@ fn handle_debug_mode(args: &Args, max_file_size: Option<u64>) -> Result<(), Stri
                 println!();
             }
         }
-        _ => unreachable!("ArgGroup ensures exactly one of file or dir is Some"),
     }
 
     Ok(())
