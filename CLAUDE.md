@@ -443,3 +443,21 @@ Releases are automated via `release-plz`:
 - **.tarpaulin.toml**: Coverage configuration
 - **.github/workflows/**: CI/CD pipelines
 - **clippy.toml**: Clippy configuration (cognitive complexity threshold)
+
+## Soft rules
+
+- **Rule 1:** When implementing code, prefer iterating over collections without collecting the results and assigning it to a variable
+- **Rule 2:** Whenever new code is added to project, write unit tests that cover all its execution paths and control flows
+
+## Hard rules
+
+- **Rule 1:** Run `cargo fmt` after every conversation that changes or adds news `.rs` files
+- **Rule 2:** Run `cargo clippy --all-targets --all-features -- -D warnings` after every conversation that changes or adds news `.rs` files 
+- **Rule 3:** Ensure rustdoc comments are always in-sync with the code they comment
+- **Rule 4:** Whenever you add new code to the project, ensure you use Rust patterns that make all execution paths of the new code easily testable
+- **Rule 5:** Whenever you add new code to the project, ensure it has complete and eloquent rustdoc comments
+- **Rule 6:** Ensure all rustdoc comments follow a consistent, professional, and eloquent style and tone
+- **Rule 7:** When you add a dependency to `Cargo.toml`, ensure you are adding the latest stable version of the dependency
+- **Rule 8:** Ensure code coverage always remains 1% above the limit configured in tarpaulin
+- **Rule 9:** Handover commit tasks to the `/c` SlashCommand
+
