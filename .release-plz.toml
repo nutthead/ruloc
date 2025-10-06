@@ -121,10 +121,19 @@ commit_preprocessors = [
     { pattern = '\\((\\w+\\s)?#([0-9]+)\\)', replace = "([#${2}](https://github.com/nutthead/ruloc/issues/${2}))" },
 ]
 commit_parsers = [
-    # Skip rule: ONLY commits with $no-changelog tag are excluded from changelog
+    # ========================================================================
+    # Skip Rules (highest priority - evaluated first)
+    # ========================================================================
+    # Commits with $no-changelog tag are excluded from changelog
+    # Example: "feat: Add feature\n\n$feat, $no-changelog"
     { body = ".*\\$no-changelog", skip = true },
 
-    # Primary: Tag-based grouping (footer $tag determines changelog category)
+    # ========================================================================
+    # Primary Classification: Tag-based Grouping
+    # ========================================================================
+    # /c command generates commits with footer tags like "$type" or "$type, $no-changelog"
+    # Format: "type[(scope)]: description\n\nbody\n\n$type"
+    # The $type tag determines the changelog category (takes precedence over subject line)
     { body = ".*\\$feat", group = "⭐ Features" },
     { body = ".*\\$fix", group = "🐛 Bug Fixes" },
     { body = ".*\\$docs", group = "📚 Documentation" },
@@ -136,25 +145,33 @@ commit_parsers = [
     { body = ".*\\$ci", group = "👷 CI/CD" },
     { body = ".*\\$revert", group = "⏪ Reverts" },
     { body = ".*\\$chore", group = "🧹 Miscellaneous" },
+    { body = ".*\\$misc", group = "🧹 Miscellaneous" },
 
-    # Special cases
+    # ========================================================================
+    # Special Case: Security-related commits
+    # ========================================================================
     { body = ".*security", group = "🔐 Security" },
 
-    # Fallback: Message-based grouping (for commits without tags)
+    # ========================================================================
+    # Fallback: Message-based Grouping (for commits without footer tags)
+    # ========================================================================
+    # These rules classify commits based on subject line prefix when no $tag present
+    # Format: "type[(scope)]: description"
     { message = "^feat", group = "⭐ Features" },
     { message = "^fix", group = "🐛 Bug Fixes" },
-    { message = "^docs", group = "📚 Documentation" },
-    { message = "^doc", group = "📚 Documentation" },
+    { message = "^docs?", group = "📚 Documentation" },
     { message = "^perf", group = "⚡ Performance" },
     { message = "^refactor", group = "🔨 Refactor" },
     { message = "^style", group = "🎨 Styling" },
     { message = "^test", group = "🧪 Testing" },
-    { message = "^chore", group = "🧹 Miscellaneous" },
-    { message = "^revert", group = "⏪ Reverts" },
     { message = "^build", group = "📦 Build System" },
     { message = "^ci", group = "👷 CI/CD" },
-    { message = "^polish", group = "✨ Polish" },
+    { message = "^revert", group = "⏪ Reverts" },
+    { message = "^chore", group = "🧹 Miscellaneous" },
+    { message = "^misc", group = "🧹 Miscellaneous" },
 
-    # Catch-all
+    # ========================================================================
+    # Catch-all (lowest priority)
+    # ========================================================================
     { message = ".*", group = "🧹 Miscellaneous" },
 ]

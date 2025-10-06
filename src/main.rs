@@ -542,16 +542,34 @@ enum OutputFormat {
     Json,
 }
 
+/// Represents the input source for analysis (file or directory).
+///
+/// This enum encodes the invariant that exactly one input type is provided,
+/// which is enforced by clap's ArgGroup but represented as a proper type.
+#[derive(Debug, Clone)]
+enum InputSource {
+    /// Analyze a single Rust file.
+    File(PathBuf),
+
+    /// Analyze all Rust files in a directory recursively.
+    Directory(PathBuf),
+}
+
 /// Command-line arguments for ruloc.
 #[derive(Debug, Parser)]
 #[command(name = "ruloc", version, about = "Rust lines of code counter")]
+#[command(group(
+    clap::ArgGroup::new("input")
+        .required(true)
+        .args(&["file", "dir"])
+))]
 struct Args {
     /// Analyze a single Rust file.
-    #[arg(short, long, value_name = "FILE", conflicts_with = "dir")]
+    #[arg(short, long, value_name = "FILE")]
     file: Option<PathBuf>,
 
     /// Analyze all Rust files in a directory recursively.
-    #[arg(short, long, value_name = "DIR", conflicts_with = "file")]
+    #[arg(short, long, value_name = "DIR")]
     dir: Option<PathBuf>,
 
     /// Output in plain text format (default).
@@ -581,6 +599,26 @@ struct Args {
 }
 
 impl Args {
+    /// Extracts the validated input source from command-line arguments.
+    ///
+    /// Converts the two `Option<PathBuf>` fields into a single `InputSource` enum,
+    /// encoding the ArgGroup invariant that exactly one is `Some` at the type level.
+    ///
+    /// # Returns
+    ///
+    /// `InputSource` enum representing either a file or directory path
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ArgGroup invariant is violated (should never happen with proper clap setup)
+    fn input_source(&self) -> InputSource {
+        match (&self.file, &self.dir) {
+            (Some(path), None) => InputSource::File(path.clone()),
+            (None, Some(path)) => InputSource::Directory(path.clone()),
+            _ => unreachable!("ArgGroup ensures exactly one of file or dir is Some"),
+        }
+    }
+
     /// Parses the max file size from the command-line argument.
     ///
     /// Supports units: KB, MB, GB. Without a unit, interprets as bytes.
@@ -599,9 +637,7 @@ impl Args {
 
         parse_file_size(size_str).map(Some)
     }
-}
 
-impl Args {
     /// Determines the output format based on command-line flags.
     ///
     /// # Returns
@@ -730,15 +766,17 @@ fn parse_file_size(size_str: &str) -> Result<u64, String> {
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
-    // Initialize logger
-    if args.verbose {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Trace)
-            .init();
-    } else {
-        env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Warn)
-            .init();
+    match args.verbose {
+        true => {
+            env_logger::Builder::from_default_env()
+                .filter_level(log::LevelFilter::Trace)
+                .init();
+        }
+        false => {
+            env_logger::Builder::from_default_env()
+                .filter_level(log::LevelFilter::Warn)
+                .init();
+        }
     }
 
     // Parse max file size if specified
@@ -746,51 +784,22 @@ fn main() -> Result<(), String> {
 
     // Handle debug mode separately
     if args.debug {
-        let use_color = !args.no_color;
-
-        if let Some(file_path) = &args.file {
-            output_file_debug(file_path, use_color, max_file_size)?;
-        } else if let Some(dir_path) = &args.dir {
-            // Collect all Rust files
-            let rust_files: Vec<_> = WalkDir::new(dir_path)
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
-                .collect();
-
-            for entry in rust_files {
-                let path = entry.path();
-                // Skip files that exceed size limit
-                if let Err(e) = output_file_debug(path, use_color, max_file_size) {
-                    eprintln!("Warning: {}", e);
-                    continue;
-                }
-                println!(); // Blank line between files
-            }
-        } else {
-            eprintln!("Error: Either --file or --dir must be specified.\n");
-            eprintln!("Use --help for more information.");
-            std::process::exit(1);
-        }
-
-        return Ok(());
+        return handle_debug_mode(&args, max_file_size);
     }
 
     // Create file-backed accumulator for memory-efficient processing
     let mut accumulator = FileBackedAccumulator::new()?;
 
     // Determine what to analyze and collect stats into accumulator
-    if let Some(file_path) = &args.file {
-        let stats = analyze_file(file_path, max_file_size)?;
-        accumulator.add_file(&stats)?;
-    } else if let Some(dir_path) = &args.dir {
-        analyze_directory(dir_path, max_file_size, &mut accumulator)?;
-    } else {
-        // No arguments provided, show help
-        eprintln!("Error: Either --file or --dir must be specified.\n");
-        eprintln!("Use --help for more information.");
-        std::process::exit(1);
-    };
+    match args.input_source() {
+        InputSource::File(file_path) => {
+            let stats = analyze_file(&file_path, max_file_size)?;
+            accumulator.add_file(&stats)?;
+        }
+        InputSource::Directory(dir_path) => {
+            analyze_directory(&dir_path, max_file_size, &mut accumulator)?;
+        }
+    }
 
     // Flush accumulator to ensure all data is written
     accumulator.flush()?;
@@ -1222,31 +1231,17 @@ fn analyze_directory<A: StatsAccumulator>(
     max_file_size: Option<u64>,
     accumulator: &mut A,
 ) -> Result<(), String> {
-    // First pass: collect all .rs file paths
-    let rust_files: Vec<PathBuf> = WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    if rust_files.is_empty() {
-        return Err(format!("No Rust files found in {}", dir.display()));
-    }
-
-    // Setup progress bar only if we're in a terminal
+    // Setup progress spinner only if we're in a terminal
     let is_terminal = std::io::stdout().is_terminal();
     let progress = if is_terminal {
-        let bar = ProgressBar::new(rust_files.len() as u64);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("█▓░"),
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("[{elapsed_precise}] {spinner:.cyan} {pos} files analyzed {msg}")
+                .unwrap(),
         );
-        bar
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+        spinner
     } else {
         ProgressBar::hidden()
     };
@@ -1254,39 +1249,55 @@ fn analyze_directory<A: StatsAccumulator>(
     // Atomic counters
     let skipped_count = Arc::new(AtomicUsize::new(0));
     let analyzed_count = Arc::new(AtomicUsize::new(0));
+    let total_files_found = Arc::new(AtomicUsize::new(0));
 
     // Wrap accumulator in Arc<Mutex<>> for thread-safe access
     let accumulator_mutex = Arc::new(Mutex::new(accumulator));
 
-    // Second pass: analyze files in parallel
-    rust_files.par_iter().for_each(|path| {
-        let result = analyze_file(path, max_file_size);
-        progress.inc(1);
+    // Stream and analyze files in parallel without collecting
+    WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
+        .par_bridge()
+        .for_each(|entry| {
+            let path = entry.path();
+            total_files_found.fetch_add(1, Ordering::Relaxed);
 
-        match result {
-            Ok(stats) => {
-                // Add to accumulator
-                let mut acc = accumulator_mutex.lock().unwrap();
-                if let Err(e) = acc.add_file(&stats) {
-                    progress.println(format!("Error adding file stats: {}", e));
-                } else {
-                    analyzed_count.fetch_add(1, Ordering::Relaxed);
+            let result = analyze_file(path, max_file_size);
+            progress.inc(1);
+
+            match result {
+                Ok(stats) => {
+                    // Add to accumulator
+                    let mut acc = accumulator_mutex.lock().unwrap();
+                    if let Err(e) = acc.add_file(&stats) {
+                        progress.println(format!("Error adding file stats: {}", e));
+                    } else {
+                        analyzed_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(e) if e.contains("exceeds maximum size") => {
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    debug!("Skipped: {}", e);
+                }
+                Err(e) => {
+                    progress.println(format!("Error: {}", e));
                 }
             }
-            Err(e) if e.contains("exceeds maximum size") => {
-                skipped_count.fetch_add(1, Ordering::Relaxed);
-                debug!("Skipped: {}", e);
-            }
-            Err(e) => {
-                progress.println(format!("Error: {}", e));
-            }
-        }
-    });
+        });
 
     progress.finish_with_message("Analysis complete");
 
     let final_analyzed = analyzed_count.load(Ordering::Relaxed);
     let final_skipped = skipped_count.load(Ordering::Relaxed);
+    let final_total = total_files_found.load(Ordering::Relaxed);
+
+    if final_total == 0 {
+        return Err(format!("No Rust files found in {}", dir.display()));
+    }
 
     debug!(
         "Analyzed {} files in {} (skipped {} files exceeding size limit)",
@@ -1439,6 +1450,50 @@ fn output_file_debug(
         if i < line_types.len() && i < is_test_line.len() {
             let formatted = format_debug_line(line, line_types[i], is_test_line[i], use_color);
             println!("{}", formatted);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handles debug mode output for files or directories.
+///
+/// Processes either a single file or all Rust files in a directory, outputting
+/// line-by-line debug information with type annotations. Uses exhaustive pattern
+/// matching on `InputSource` to handle both cases without needing a catch-all.
+///
+/// # Arguments
+///
+/// * `args` - Command-line arguments containing file/dir paths and color settings
+/// * `max_file_size` - Optional maximum file size limit
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error message if analysis fails
+///
+/// # Errors
+///
+/// Returns an error if file reading or analysis fails
+fn handle_debug_mode(args: &Args, max_file_size: Option<u64>) -> Result<(), String> {
+    let use_color = !args.no_color;
+
+    match args.input_source() {
+        InputSource::File(file_path) => {
+            output_file_debug(&file_path, use_color, max_file_size)?;
+        }
+        InputSource::Directory(dir_path) => {
+            for entry in WalkDir::new(&dir_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+            {
+                let path = entry.path();
+                if let Err(e) = output_file_debug(path, use_color, max_file_size) {
+                    eprintln!("Warning: {}", e);
+                    continue;
+                }
+                println!();
+            }
         }
     }
 
