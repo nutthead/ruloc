@@ -110,10 +110,15 @@ protect_breaking_commits = true
 tag_pattern = "^v\\d+\\.\\d+\\.\\d+$"
 sort_commits = "oldest"
 commit_preprocessors = [
-    # Remove issue numbers like (#123) or (fix #123) from commit messages
-    # NOTE: Cannot use negative lookahead (?!...) - not supported by release-plz regex engine
-    # This means PR references at the end may also be removed, which is acceptable
-    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)', replace = "" },
+    # Convert issue/PR references to clickable hyperlinks
+    # Examples:
+    #   (fix #123) → ([#123](https://github.com/nutthead/ruloc/issues/123))
+    #   (closes #456) → ([#456](https://github.com/nutthead/ruloc/issues/456))
+    #   (#789) → ([#789](https://github.com/nutthead/ruloc/issues/789))
+    #
+    # Note: Links to /issues/ endpoint which GitHub redirects to /pull/ for PRs
+    # This provides full traceability while keeping changelogs clean
+    { pattern = '\\((\\w+\\s)?#([0-9]+)\\)', replace = "([#${2}](https://github.com/nutthead/ruloc/issues/${2}))" },
 ]
 commit_parsers = [
     # Skip rule: ONLY commits with $no-changelog tag are excluded from changelog
