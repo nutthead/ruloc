@@ -770,8 +770,7 @@ The changelog format can be customized in `.release-plz.toml`:
 - 🎨 Styling - `style:` commits or `$style` tag
 - 📦 Build System - `build:` commits or `$build` tag
 - 👷 CI/CD - `ci:` commits or `$ci` tag
-- ✨ Polish - `polish:` commits
-- 🧹 Miscellaneous - `chore:` commits or `$chore` tag
+- 🧹 Miscellaneous - `chore:` commits, `misc:` commits, `$chore` tag, or `$misc` tag
 - ⏪ Reverts - `revert:` commits or `$revert` tag
 - 🔐 Security - Commits containing "security"
 
