@@ -240,6 +240,8 @@ jobs:
         id: package
         shell: bash
         run: |
+          set -euo pipefail
+
           BINARY_NAME="ruloc"
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             BINARY_NAME="${BINARY_NAME}.exe"
@@ -247,9 +249,37 @@ jobs:
 
           VERSION="${{ needs.prepare-release.outputs.version }}"
           ARCHIVE_NAME="ruloc-${VERSION}-${{ matrix.target }}"
+          BINARY_PATH="target/${{ matrix.target }}/release/${BINARY_NAME}"
 
+          echo "=== Verifying build artifacts ==="
+
+          # Verify binary exists
+          if [ ! -f "${BINARY_PATH}" ]; then
+            echo "❌ ERROR: Binary not found at ${BINARY_PATH}"
+            echo "Build may have failed silently"
+            echo "Directory contents:"
+            ls -la "target/${{ matrix.target }}/release/" 2>/dev/null || echo "Release directory does not exist"
+            exit 1
+          fi
+          echo "✅ Binary found: ${BINARY_PATH}"
+
+          # Verify README.md exists
+          if [ ! -f "README.md" ]; then
+            echo "❌ ERROR: README.md not found in repository root"
+            exit 1
+          fi
+          echo "✅ README.md found"
+
+          # Verify LICENSE exists
+          if [ ! -f "LICENSE" ]; then
+            echo "❌ ERROR: LICENSE file not found in repository root"
+            exit 1
+          fi
+          echo "✅ LICENSE found"
+
+          echo "=== Packaging artifacts ==="
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "dist/${BINARY_NAME}"
+          cp "${BINARY_PATH}" "dist/${BINARY_NAME}"
           cp README.md LICENSE dist/
 
           ARCHIVE_BASENAME="${ARCHIVE_NAME}.tar.gz"
@@ -263,16 +293,45 @@ jobs:
           else
             tar -czf "../${ARCHIVE_BASENAME}" .
           fi
-
-          if [[ "${{ matrix.os }}" == "macos-14" ]]; then
-            shasum -a 256 "../${ARCHIVE_BASENAME}" > "../${ARCHIVE_NAME}.sha256"
-          else
-            sha256sum "../${ARCHIVE_BASENAME}" > "../${ARCHIVE_NAME}.sha256"
-          fi
           popd >/dev/null
 
+          # Verify archive was created
+          if [ ! -f "${ARCHIVE_BASENAME}" ]; then
+            echo "❌ ERROR: Archive not created: ${ARCHIVE_BASENAME}"
+            echo "Packaging command may have failed"
+            exit 1
+          fi
+          echo "✅ Archive created: ${ARCHIVE_BASENAME}"
+
+          # Generate checksum
+          if [[ "${{ matrix.os }}" == "macos-14" ]]; then
+            shasum -a 256 "${ARCHIVE_BASENAME}" > "${ARCHIVE_NAME}.sha256"
+          else
+            sha256sum "${ARCHIVE_BASENAME}" > "${ARCHIVE_NAME}.sha256"
+          fi
+
+          # Verify checksum file was created
+          if [ ! -f "${ARCHIVE_NAME}.sha256" ]; then
+            echo "❌ ERROR: Checksum file not created: ${ARCHIVE_NAME}.sha256"
+            exit 1
+          fi
+          echo "✅ Checksum created: ${ARCHIVE_NAME}.sha256"
+
+          # Move files to dist directory
           mv "${ARCHIVE_BASENAME}" dist/
           mv "${ARCHIVE_NAME}.sha256" dist/
+
+          # Verify files were moved successfully
+          if [ ! -f "dist/${ARCHIVE_BASENAME}" ]; then
+            echo "❌ ERROR: Archive not found in dist/ after move"
+            exit 1
+          fi
+          if [ ! -f "dist/${ARCHIVE_NAME}.sha256" ]; then
+            echo "❌ ERROR: Checksum not found in dist/ after move"
+            exit 1
+          fi
+
+          echo "✅ Packaging complete"
           echo "archive=${ARCHIVE_BASENAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload build artifacts
@@ -302,13 +361,42 @@ jobs:
           pattern: binary-*
           merge-multiple: true
 
-      - name: Debug artifact structure
+      - name: Verify downloaded artifacts
         run: |
+          echo "=== Verifying artifacts directory ==="
+
+          # Check if artifacts directory exists
+          if [ ! -d "artifacts" ]; then
+            echo "❌ ERROR: artifacts directory was not created"
+            echo "Artifact download may have failed"
+            exit 1
+          fi
+          echo "✅ artifacts directory exists"
+
+          # Check if artifacts directory contains files
+          if [ -z "$(ls -A artifacts 2>/dev/null)" ]; then
+            echo "❌ ERROR: artifacts directory is empty"
+            echo "No artifacts were downloaded"
+            exit 1
+          fi
+          echo "✅ artifacts directory contains files"
+
+          echo ""
           echo "=== Artifact directory structure ==="
           find artifacts -type f | sort
+
           echo ""
           echo "=== Archives found ==="
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort
+          ARCHIVES=$(find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort)
+          if [ -z "$ARCHIVES" ]; then
+            echo "❌ ERROR: No .tar.gz or .zip archives found in artifacts/"
+            echo "Build artifacts may not have been uploaded correctly"
+            exit 1
+          fi
+          echo "$ARCHIVES"
+          ARCHIVE_COUNT=$(echo "$ARCHIVES" | wc -l)
+          echo ""
+          echo "✅ Found $ARCHIVE_COUNT archive(s) ready for signing"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0

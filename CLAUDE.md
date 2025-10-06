@@ -452,7 +452,7 @@ Releases are automated via `release-plz`:
 ## Hard rules
 
 - **Rule 1:** Run `cargo fmt` after every conversation that changes or adds news `.rs` files
-- **Rule 2:** Run `cargo clippy --all-targets --all-features -- -D warnings` after every conversation that changes or adds news `.rs` files 
+- **Rule 2:** Run `cargo clippy --all-targets --all-features -- -D warnings` after every conversation that changes or adds news `.rs` files
 - **Rule 3:** Ensure rustdoc comments are always in-sync with the code they comment
 - **Rule 4:** Whenever you add new code to the project, ensure you use Rust patterns that make all execution paths of the new code easily testable
 - **Rule 5:** Whenever you add new code to the project, ensure it has complete and eloquent rustdoc comments
@@ -460,4 +460,5 @@ Releases are automated via `release-plz`:
 - **Rule 7:** When you add a dependency to `Cargo.toml`, ensure you are adding the latest stable version of the dependency
 - **Rule 8:** Ensure code coverage always remains 1% above the limit configured in tarpaulin
 - **Rule 9:** Handover commit tasks to the `/c` SlashCommand
+- **Rule 10:** In GitHub Actions workflows, never assume files or directories exist at expected paths - always verify their existence with explicit checks and provide helpful debugging output if assumptions are violated
 
