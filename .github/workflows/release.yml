@@ -302,6 +302,14 @@ jobs:
           pattern: binary-*
           merge-multiple: true
 
+      - name: Debug artifact structure
+        run: |
+          echo "=== Artifact directory structure ==="
+          find artifacts -type f | sort
+          echo ""
+          echo "=== Archives found ==="
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort
+
       - name: Install cosign
         uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
         with:
@@ -325,17 +333,27 @@ jobs:
         run: |
           set -e  # Exit on any error
 
-          # Find all archives to sign
-          ARCHIVES=$(find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \))
+          echo "Searching for archives to sign..."
+
+          # Find all archives to sign (exclude .sig, .crt, .sha256 files)
+          ARCHIVES=$(find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) ! -name "*.sig" ! -name "*.crt" | sort)
 
           if [ -z "$ARCHIVES" ]; then
             echo "❌ ERROR: No archives found to sign!"
+            echo "Directory contents:"
+            ls -laR artifacts/
             exit 1
           fi
 
+          echo "Found archives to sign:"
+          echo "$ARCHIVES"
+          echo ""
+
           SIGNED_COUNT=0
           while IFS= read -r file; do
-            echo "Signing: $file"
+            [ -z "$file" ] && continue  # Skip empty lines
+
+            echo "=== Signing: $file ==="
             cosign sign-blob \
               --yes \
               --oidc-issuer="https://token.actions.githubusercontent.com" \
@@ -349,9 +367,11 @@ jobs:
               exit 1
             fi
 
+            echo "✓ Signed successfully"
             ((SIGNED_COUNT++))
           done <<< "$ARCHIVES"
 
+          echo ""
           echo "✅ Successfully signed $SIGNED_COUNT artifacts"
 
       - name: Upload attestation artifacts
