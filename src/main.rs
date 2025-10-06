@@ -1231,31 +1231,17 @@ fn analyze_directory<A: StatsAccumulator>(
     max_file_size: Option<u64>,
     accumulator: &mut A,
 ) -> Result<(), String> {
-    // First pass: collect all .rs file paths
-    let rust_files: Vec<PathBuf> = WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    if rust_files.is_empty() {
-        return Err(format!("No Rust files found in {}", dir.display()));
-    }
-
-    // Setup progress bar only if we're in a terminal
+    // Setup progress spinner only if we're in a terminal
     let is_terminal = std::io::stdout().is_terminal();
     let progress = if is_terminal {
-        let bar = ProgressBar::new(rust_files.len() as u64);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-                .unwrap()
-                .progress_chars("█▓░"),
+        let spinner = ProgressBar::new_spinner();
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("[{elapsed_precise}] {spinner:.cyan} {pos} files analyzed {msg}")
+                .unwrap(),
         );
-        bar
+        spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+        spinner
     } else {
         ProgressBar::hidden()
     };
@@ -1263,39 +1249,55 @@ fn analyze_directory<A: StatsAccumulator>(
     // Atomic counters
     let skipped_count = Arc::new(AtomicUsize::new(0));
     let analyzed_count = Arc::new(AtomicUsize::new(0));
+    let total_files_found = Arc::new(AtomicUsize::new(0));
 
     // Wrap accumulator in Arc<Mutex<>> for thread-safe access
     let accumulator_mutex = Arc::new(Mutex::new(accumulator));
 
-    // Second pass: analyze files in parallel
-    rust_files.par_iter().for_each(|path| {
-        let result = analyze_file(path, max_file_size);
-        progress.inc(1);
+    // Stream and analyze files in parallel without collecting
+    WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("rs"))
+        .par_bridge()
+        .for_each(|entry| {
+            let path = entry.path();
+            total_files_found.fetch_add(1, Ordering::Relaxed);
 
-        match result {
-            Ok(stats) => {
-                // Add to accumulator
-                let mut acc = accumulator_mutex.lock().unwrap();
-                if let Err(e) = acc.add_file(&stats) {
-                    progress.println(format!("Error adding file stats: {}", e));
-                } else {
-                    analyzed_count.fetch_add(1, Ordering::Relaxed);
+            let result = analyze_file(path, max_file_size);
+            progress.inc(1);
+
+            match result {
+                Ok(stats) => {
+                    // Add to accumulator
+                    let mut acc = accumulator_mutex.lock().unwrap();
+                    if let Err(e) = acc.add_file(&stats) {
+                        progress.println(format!("Error adding file stats: {}", e));
+                    } else {
+                        analyzed_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(e) if e.contains("exceeds maximum size") => {
+                    skipped_count.fetch_add(1, Ordering::Relaxed);
+                    debug!("Skipped: {}", e);
+                }
+                Err(e) => {
+                    progress.println(format!("Error: {}", e));
                 }
             }
-            Err(e) if e.contains("exceeds maximum size") => {
-                skipped_count.fetch_add(1, Ordering::Relaxed);
-                debug!("Skipped: {}", e);
-            }
-            Err(e) => {
-                progress.println(format!("Error: {}", e));
-            }
-        }
-    });
+        });
 
     progress.finish_with_message("Analysis complete");
 
     let final_analyzed = analyzed_count.load(Ordering::Relaxed);
     let final_skipped = skipped_count.load(Ordering::Relaxed);
+    let final_total = total_files_found.load(Ordering::Relaxed);
+
+    if final_total == 0 {
+        return Err(format!("No Rust files found in {}", dir.display()));
+    }
 
     debug!(
         "Analyzed {} files in {} (skipped {} files exceeding size limit)",
