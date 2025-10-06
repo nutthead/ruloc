@@ -114,9 +114,27 @@ jobs:
 
       - name: Verify Cargo.toml version matches
         run: |
+          set -euo pipefail
+
           VERSION="${{ steps.version.outputs.version }}"
+
+          # Verify Cargo.toml exists
+          if [ ! -f "Cargo.toml" ]; then
+            echo "❌ ERROR: Cargo.toml not found in repository root"
+            echo "Tag may be pointing to incorrect ref"
+            exit 1
+          fi
+          echo "✅ Cargo.toml found"
+
           # Use cargo metadata for robust version parsing
           CARGO_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
+
+          # Verify version was extracted successfully
+          if [ -z "$CARGO_VERSION" ] || [ "$CARGO_VERSION" = "null" ]; then
+            echo "❌ ERROR: Could not extract version from Cargo.toml"
+            echo "Cargo.toml may be malformed"
+            exit 1
+          fi
 
           if [ "$VERSION" != "$CARGO_VERSION" ]; then
             echo "❌ Version mismatch!"

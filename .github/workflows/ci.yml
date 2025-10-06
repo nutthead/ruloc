@@ -135,6 +135,15 @@ jobs:
           done
 
           cargo audit --json | tee audit.json
+
+          # Verify audit output was created
+          if [ ! -f "audit.json" ]; then
+            echo "❌ ERROR: audit.json was not created by cargo audit"
+            echo "This is unexpected - cargo audit should always produce output"
+            exit 1
+          fi
+          echo "✅ Security audit output saved to audit.json"
+
           cargo deny check advisories
 
       - name: Upload audit results
@@ -261,6 +270,19 @@ jobs:
             exit $EXIT_CODE  # Fail immediately on real errors
           fi
 
+      - name: Verify coverage report exists
+        if: always()
+        run: |
+          echo "Checking for coverage report..."
+          if [ ! -f "target/tarpaulin/cobertura.xml" ]; then
+            echo "❌ ERROR: Coverage report not found at target/tarpaulin/cobertura.xml"
+            echo "Tarpaulin may have failed to generate the report"
+            echo "Directory contents:"
+            ls -la target/tarpaulin/ 2>/dev/null || echo "target/tarpaulin/ directory does not exist"
+            exit 1
+          fi
+          echo "✅ Coverage report found"
+
       - name: Upload coverage to Codecov
         if: always()
         uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
@@ -288,8 +310,22 @@ jobs:
 
       - name: Install coverage parser
         if: always() && steps.check-pr.outputs.should_comment == 'true'
-        working-directory: .github/scripts/coverage-comment
-        run: npm ci
+        run: |
+          # Verify coverage-comment directory exists
+          if [ ! -d ".github/scripts/coverage-comment" ]; then
+            echo "❌ ERROR: Directory .github/scripts/coverage-comment does not exist"
+            exit 1
+          fi
+
+          # Verify package.json exists
+          if [ ! -f ".github/scripts/coverage-comment/package.json" ]; then
+            echo "❌ ERROR: package.json not found in .github/scripts/coverage-comment"
+            exit 1
+          fi
+
+          echo "✅ Coverage comment directory and package.json verified"
+          cd .github/scripts/coverage-comment
+          npm ci
 
       - name: Comment coverage on PR
         if: always() && steps.check-pr.outputs.should_comment == 'true'
@@ -297,15 +333,22 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const path = require('path');
             const { XMLParser } = require('.github/scripts/coverage-comment/node_modules/fast-xml-parser');
             const dedent = require('.github/scripts/coverage-comment/node_modules/dedent');
+
+            // Verify coverage report exists before parsing
+            const coverageFilePath = 'target/tarpaulin/cobertura.xml';
+            if (!fs.existsSync(coverageFilePath)) {
+              throw new Error(`Coverage report not found at ${coverageFilePath}`);
+            }
 
             const parser = new XMLParser({
               ignoreAttributes: false,
               attributeNamePrefix: ''
             });
 
-            const rawXml = fs.readFileSync('target/tarpaulin/cobertura.xml', 'utf8');
+            const rawXml = fs.readFileSync(coverageFilePath, 'utf8');
             const parsed = parser.parse(rawXml);
             const coverage = parsed.coverage;
 

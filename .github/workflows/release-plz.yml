@@ -47,6 +47,14 @@ jobs:
       - name: Check for version change
         id: check
         run: |
+          set -euo pipefail
+
+          # Verify Cargo.toml exists in current checkout
+          if [ ! -f "Cargo.toml" ]; then
+            echo "❌ ERROR: Cargo.toml not found in repository root"
+            exit 1
+          fi
+
           # Check if HEAD~1 exists (handles first commit case)
           if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
             echo "First commit detected - no previous version to compare"
@@ -57,8 +65,21 @@ jobs:
           if git diff HEAD~1 HEAD --name-only | grep -q "^Cargo.toml$"; then
             # Previous version: use grep on git show output (historical file)
             PREV_VERSION=$(git show HEAD~1:Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
+
+            # Verify previous version was found
+            if [ -z "$PREV_VERSION" ]; then
+              echo "❌ ERROR: Could not extract version from previous Cargo.toml"
+              exit 1
+            fi
+
             # Current version: use cargo metadata for robust parsing
             CURR_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].version')
+
+            # Verify current version was found
+            if [ -z "$CURR_VERSION" ] || [ "$CURR_VERSION" = "null" ]; then
+              echo "❌ ERROR: Could not extract version from current Cargo.toml"
+              exit 1
+            fi
 
             if [[ "$PREV_VERSION" != "$CURR_VERSION" ]]; then
               echo "Version changed from $PREV_VERSION to $CURR_VERSION"
