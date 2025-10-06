@@ -1,0 +1,23 @@
+{
+  "env" : {
+    "MAX_THINKING_TOKENS": "16384"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(cat:*)",
+      "Bash(find:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh repo view:*)",
+      "Bash(python3:*)",
+      "Bash(rustup component:*)",
+      "Bash(shellcheck:*)",
+      "WebFetch(domain:claude.com)",
+      "WebFetch(domain:docs.claude.com)",
+      "WebFetch(domain:github.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
