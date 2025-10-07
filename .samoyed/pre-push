@@ -34,8 +34,8 @@ if command -v cargo-tarpaulin >/dev/null 2>&1; then
         exit 1
     fi
 
-    # Extract coverage percentage from output
-    coverage=$(grep -oP '\d+\.\d+%' /tmp/tarpaulin-output.txt | tail -1 | tr -d '%' || echo "0")
+    # Extract coverage percentage from output (look for "XX.XX% coverage" line)
+    coverage=$(grep -oP '\d+\.\d+(?=% coverage)' /tmp/tarpaulin-output.txt | tail -1 || echo "0")
     min_coverage=70.0
 
     # Use awk for floating point comparison
