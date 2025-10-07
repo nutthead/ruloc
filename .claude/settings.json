@@ -15,8 +15,11 @@
       "Bash(shellcheck:*)",
       "Edit",
       "WebFetch(domain:claude.com)",
+      "WebFetch(domain:crates.io)",
       "WebFetch(domain:docs.claude.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:githubusercontent.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "deny": [],
     "ask": []
