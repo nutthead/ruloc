@@ -717,6 +717,22 @@ jobs:
           *Released with ❤️ using GitHub Actions, release-plz, and Sigstore*
           EOF
 
+      - name: Create release tag
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+
+          echo "Creating tag v${VERSION}..."
+
+          # Configure git for the workflow
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create and push the tag
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+
+          echo "✅ Tag v${VERSION} created and pushed"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
         with:
