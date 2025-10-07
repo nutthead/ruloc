@@ -537,6 +537,78 @@ jobs:
         with:
           path: release-artifacts
 
+      - name: Verify downloaded artifacts
+        run: |
+          echo "=== Verifying release artifacts ==="
+
+          # Check if release-artifacts directory exists
+          if [ ! -d "release-artifacts" ]; then
+            echo "❌ ERROR: release-artifacts directory was not created"
+            echo "Artifact download failed"
+            exit 1
+          fi
+          echo "✅ release-artifacts directory exists"
+
+          # Check if directory contains files
+          if [ -z "$(ls -A release-artifacts 2>/dev/null)" ]; then
+            echo "❌ ERROR: release-artifacts directory is empty"
+            echo "No artifacts were downloaded from previous jobs"
+            exit 1
+          fi
+          echo "✅ release-artifacts directory contains files"
+
+          # List all downloaded artifacts for debugging
+          echo ""
+          echo "Downloaded artifacts:"
+          find release-artifacts -type f | sort
+
+          # Count archives (tar.gz and zip)
+          ARCHIVE_COUNT=$(find release-artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) | wc -l)
+          echo ""
+          echo "Archive count: ${ARCHIVE_COUNT}"
+
+          if [ "$ARCHIVE_COUNT" -eq 0 ]; then
+            echo "❌ ERROR: No .tar.gz or .zip archives found"
+            exit 1
+          fi
+          echo "✅ Found ${ARCHIVE_COUNT} release archives"
+
+      - name: Check for existing release
+        id: check_release
+        run: |
+          VERSION="${{ needs.prepare-release.outputs.version }}"
+
+          # Check if release already exists
+          if gh release view "v${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "⚠️  Release v${VERSION} already exists"
+
+            # Get release info
+            IS_DRAFT=$(gh release view "v${VERSION}" --repo "${{ github.repository }}" --json isDraft -q '.isDraft')
+            ASSET_COUNT=$(gh release view "v${VERSION}" --repo "${{ github.repository }}" --json assets -q '.assets | length')
+
+            echo "   Draft: ${IS_DRAFT}"
+            echo "   Assets: ${ASSET_COUNT}"
+
+            if [ "$IS_DRAFT" = "false" ] && [ "$ASSET_COUNT" -eq 0 ]; then
+              echo "❌ ERROR: Published release exists with no assets (likely from previous failed run)"
+              echo "   Deleting broken release to allow recreation..."
+              gh release delete "v${VERSION}" --repo "${{ github.repository }}" --yes
+              echo "✅ Broken release deleted"
+            elif [ "$IS_DRAFT" = "false" ]; then
+              echo "❌ ERROR: Published release already exists with ${ASSET_COUNT} assets"
+              echo "   Cannot overwrite published releases. Please:"
+              echo "   1. Delete the release manually: gh release delete v${VERSION}"
+              echo "   2. Or create a new version"
+              exit 1
+            else
+              echo "✅ Draft release exists - will be updated"
+            fi
+          else
+            echo "✅ No existing release found - will create new one"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Generate release notes
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
