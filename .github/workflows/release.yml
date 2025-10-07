@@ -531,6 +531,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -591,20 +594,43 @@ jobs:
 
             if [ "$IS_DRAFT" = "false" ] && [ "$ASSET_COUNT" -eq 0 ]; then
               echo "❌ ERROR: Published release exists with no assets (likely from previous failed run)"
-              echo "   Deleting broken release to allow recreation..."
+              echo "   Deleting broken release AND tag to allow recreation..."
               gh release delete "v${VERSION}" --repo "${{ github.repository }}" --yes
               echo "✅ Broken release deleted"
+
+              # Also delete the tag - it's tainted by the immutable release
+              if git ls-remote --tags origin | grep -q "refs/tags/v${VERSION}$"; then
+                echo "   Deleting tainted tag v${VERSION}..."
+                git push origin --delete "v${VERSION}" || echo "   Warning: Could not delete tag (may not exist)"
+                echo "✅ Tainted tag deleted"
+              fi
             elif [ "$IS_DRAFT" = "false" ]; then
               echo "❌ ERROR: Published release already exists with ${ASSET_COUNT} assets"
               echo "   Cannot overwrite published releases. Please:"
               echo "   1. Delete the release manually: gh release delete v${VERSION}"
-              echo "   2. Or create a new version"
+              echo "   2. Delete the tag: git push origin --delete v${VERSION}"
+              echo "   3. Or create a new version"
               exit 1
             else
               echo "✅ Draft release exists - will be updated"
             fi
           else
-            echo "✅ No existing release found - will create new one"
+            echo "✅ No existing release found"
+
+            # Check if tag exists without a release (tainted tag scenario)
+            if git ls-remote --tags origin | grep -q "refs/tags/v${VERSION}$"; then
+              echo "⚠️  WARNING: Tag v${VERSION} exists but no release found"
+              echo "   This tag may be tainted by a previously deleted immutable release"
+              echo "   Deleting tainted tag to allow recreation..."
+              git push origin --delete "v${VERSION}" || {
+                echo "❌ ERROR: Could not delete tainted tag"
+                echo "   Please delete manually: git push origin --delete v${VERSION}"
+                exit 1
+              }
+              echo "✅ Tainted tag deleted - will create new one"
+            else
+              echo "✅ Tag v${VERSION} does not exist - will create new one"
+            fi
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
