@@ -1,0 +1,37 @@
+#!/bin/sh
+# Pre-commit hook for ruloc
+# Runs fast code quality checks before allowing commits
+#
+# Bypass: SAMOYED=0 git commit
+# Debug: SAMOYED=2 git commit
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# Check if cargo is available
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "❌ Error: cargo not found in PATH"
+    exit 1
+fi
+
+# 1. Format check
+echo "  ├─ Checking code formatting..."
+if ! cargo fmt --all -- --check; then
+    echo "❌ Format check failed!"
+    echo "💡 Run: cargo fmt --all"
+    exit 1
+fi
+echo "  │  ✓ Format check passed"
+
+# 2. Clippy linting
+echo "  └─ Running clippy..."
+if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    echo "❌ Clippy check failed!"
+    echo "💡 Fix the warnings above or run: cargo clippy --fix"
+    exit 1
+fi
+echo "     ✓ Clippy passed"
+
+echo "✅ Pre-commit checks passed!"
+exit 0

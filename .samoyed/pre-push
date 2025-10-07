@@ -1,0 +1,66 @@
+#!/bin/sh
+# Pre-push hook for ruloc
+# Runs comprehensive checks before allowing push to remote
+#
+# Bypass: SAMOYED=0 git push
+# Debug: SAMOYED=2 git push
+
+set -e
+
+echo "🚀 Running pre-push checks..."
+
+# Check if cargo is available
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "❌ Error: cargo not found in PATH"
+    exit 1
+fi
+
+# 1. Run all tests
+echo "  ├─ Running tests..."
+if ! cargo test --all-features; then
+    echo "❌ Tests failed!"
+    echo "💡 Fix failing tests before pushing"
+    exit 1
+fi
+echo "  │  ✓ All tests passed"
+
+# 2. Check if cargo-tarpaulin is installed
+if command -v cargo-tarpaulin >/dev/null 2>&1; then
+    echo "  ├─ Checking code coverage..."
+
+    # Run tarpaulin and capture output
+    if ! cargo tarpaulin --skip-clean --out Stdout 2>&1 | tee /tmp/tarpaulin-output.txt; then
+        echo "❌ Coverage check failed to run!"
+        exit 1
+    fi
+
+    # Extract coverage percentage from output (look for "XX.XX% coverage" line)
+    coverage=$(grep -oP '\d+\.\d+(?=% coverage)' /tmp/tarpaulin-output.txt | tail -1 || echo "0")
+    min_coverage=70.0
+
+    # Use awk for floating point comparison
+    if ! awk -v cov="$coverage" -v min="$min_coverage" 'BEGIN { exit !(cov >= min) }'; then
+        echo "❌ Coverage check failed!"
+        echo "   Current: ${coverage}%, Required: ${min_coverage}%"
+        echo "💡 Add tests to improve coverage"
+        rm -f /tmp/tarpaulin-output.txt
+        exit 1
+    fi
+
+    echo "  │  ✓ Coverage: ${coverage}% (≥ ${min_coverage}%)"
+    rm -f /tmp/tarpaulin-output.txt
+else
+    echo "  ├─ ⚠️  cargo-tarpaulin not installed, skipping coverage check"
+    echo "  │  💡 Install with: cargo install cargo-tarpaulin"
+fi
+
+# 3. Build in release mode
+echo "  └─ Building release binary..."
+if ! cargo build --release --all-features; then
+    echo "❌ Release build failed!"
+    exit 1
+fi
+echo "     ✓ Release build successful"
+
+echo "✅ Pre-push checks passed!"
+exit 0
